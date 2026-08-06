@@ -96,28 +96,31 @@ intouch.geckoal.com    ->  <relay address>
 intouch2.geckoal.com   ->  <relay address>
 ```
 
-In Pi-hole 6 that is Settings → Local DNS Records, or via the API:
+In Pi-hole 6 that is Settings → Local DNS Records. `tools/pihole_dns.py` does it
+over the API, and will do it to several Pi-holes at once:
 
 ```bash
-SID=$(curl -sk -X POST 'http://<pihole>/api/auth' \
-      -H 'Content-Type: application/json' \
-      -d '{"password":"<password>"}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["session"]["sid"])')
+# dry run first, it prints what it would change
+python3 tools/pihole_dns.py --relay 192.168.0.112 --password <password> \
+    --pihole http://192.168.0.222:81 \
+    --pihole http://192.168.0.112:81 \
+    --pihole http://192.168.0.55:81
 
-for NAME in intouch.geckoal.com intouch2.geckoal.com; do
-  curl -sk -X PUT "http://<pihole>/api/config/dns/hosts/<relay-ip>%20$NAME" \
-       -H "sid: $SID"
-done
+# then for real
+python3 tools/pihole_dns.py ... --apply
+
+# and confirm, asking each resolver directly
+python3 tools/pihole_dns.py --relay 192.168.0.112 \
+    --check 192.168.0.222 --check 192.168.0.112 --check 192.168.0.55
 ```
 
-Add them to **every** Pi-hole that serves DNS, not just the one you happen to
-be looking at. Then power-cycle the EN module, since it will have cached the
-old address.
+It replaces any existing record for the same name and leaves the rest alone, so
+it is safe to re-run.
 
-Verify from a machine using the same resolver:
-
-```bash
-dig +short intouch2.geckoal.com @<pihole>
-```
+Add the records to **every** Pi-hole that serves DNS, not just the one you
+happen to be looking at. Separate instances do not share config unless you run
+something like nebula-sync. Then power-cycle the EN module, since it will have
+cached the old address.
 
 Note that this overrides the hostnames for everything on your network, not just
 the spa. That is fine in practice, because nothing else has any reason to talk
@@ -250,6 +253,8 @@ gecko_relay/
 tests/
   mock_spa.py    emulated in.touch2 module
   test_relay.py  end-to-end integration test
+tools/
+  pihole_dns.py  point the Gecko hostnames at the relay, on every Pi-hole
 deploy/
   portainer-stack.yml
 docs/
