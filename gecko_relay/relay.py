@@ -101,6 +101,8 @@ class GeckoCloudRelay:
         self.bindings: dict[str, str] = {}       # client id -> spa id
         self.expected_spa_id = spa_id            # optional pin, from --spa-id
         self.pending_binding: dict[tuple, str] = {}   # addr -> spa id from ISTHR
+        self.local_client = None                 # in-process client, i.e. the poller
+        self._unroutable_seen: set = set()        # dst ids already complained about
         self.events = EventLog(log_size)
         self.started = time.time()
         self.packets_in = 0
@@ -169,6 +171,15 @@ class GeckoCloudRelay:
             ep.rx += 1
             self.by_addr[addr] = ident
             return ep
+
+    def attach_local_client(self, client) -> None:
+        """Register a client living inside this process, i.e. the status poller.
+
+        It cannot have its own socket. Against real hardware the module answers
+        on port 10022 regardless of which port the request came from, so replies
+        to the poller arrive here, on the relay's socket, not on the poller's.
+        """
+        self.local_client = client
 
     def spa(self) -> Optional[Endpoint]:
         with self.lock:
@@ -280,6 +291,10 @@ class GeckoCloudRelay:
             if ep:
                 self.send(addr, P.build_tag("HELLO", f"{ep.ident}|Spa"),
                           note="discovery reply")
+        elif self.local_client is not None and msg.value.startswith(b"SPA"):
+            # A discovery answer, which lands here because the module replies to
+            # port 10022 rather than to whoever asked.
+            self.local_client.deliver(msg, addr)
 
     def on_packt(self, msg: P.Message, addr, payload: bytes) -> None:
         if msg.src.startswith("SPA"):
@@ -289,10 +304,26 @@ class GeckoCloudRelay:
         elif msg.src:
             self.register(msg.src, addr, "client")
 
+        if (self.local_client is not None and msg.src.startswith("SPA")
+                and not msg.dst):
+            # The module answers a LAN-dialect request without naming the
+            # recipient, so an unaddressed reply from the spa belongs to the
+            # only LAN-dialect client here: the poller. App traffic coming
+            # through the relay is addressed by DESCN and never lands here.
+            self.local_client.deliver(msg, addr)
+            return
+
         target = self.resolve_target(msg)
         if target is None:
             self.packets_dropped += 1
-            LOG.warning("cannot route %s from %s (dst=%r)", msg.verb, msg.src, msg.dst)
+            # A module that still holds a session from Gecko's real cloud keeps
+            # pinging that client through us. Say so once, then stop shouting.
+            if msg.dst and msg.dst not in self._unroutable_seen:
+                self._unroutable_seen.add(msg.dst)
+                LOG.info("traffic for unknown client %s, dropping until it connects",
+                         msg.dst)
+            elif not msg.dst:
+                LOG.warning("cannot route %s from %s (no dst)", msg.verb, msg.src)
             self.events.add("sys", f"{addr[0]}:{addr[1]}", msg, payload,
                             note="dropped, no route")
             return

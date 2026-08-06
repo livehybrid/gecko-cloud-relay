@@ -17,12 +17,18 @@ captures show the real app always addressing the spa explicitly.
 
 The 2 second ping is not arbitrary either. If the ping lapses, the module stops
 sending change notifications to that client.
+
+It has no socket of its own, and cannot have one. A real module answers to port
+10022 whatever port the request came from, and answers a LAN-dialect request
+without naming the recipient, so replies arrive on the relay's socket with an
+empty ``DESCN``. The relay hands those to ``deliver``. An earlier version of
+this polled on its own socket and, against real hardware, never heard anything
+back at all.
 """
 
 from __future__ import annotations
 
 import logging
-import socket
 import threading
 import time
 import uuid
@@ -50,9 +56,6 @@ class StatusPoller:
         self.spa_id = spa_id or ""          # DESCN; learned by discovery if unset
         self.pinned_spa_id = bool(spa_id)
         self.status = P.SpaStatus()
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        self.sock.settimeout(0.5)
         self.seq = 0x20
         self.running = True
         self.connected = False
@@ -79,13 +82,7 @@ class StatusPoller:
     def send_raw(self, payload: bytes, note: str = "poller") -> None:
         if not self._target:
             return
-        try:
-            self.sock.sendto(payload, self._target)
-        except OSError as exc:
-            LOG.warning("poller send failed: %s", exc)
-            return
-        self.relay.events.add("out", f"{self._target[0]}:{self._target[1]}",
-                              P.parse(payload), payload, note=note)
+        self.relay.send(self._target, payload, note=note)
 
     def send(self, data: bytes) -> None:
         """Send a PACKT addressed to the spa."""
@@ -98,6 +95,7 @@ class StatusPoller:
             LOG.info("status poller disabled")
             return
         LOG.info("status poller client id %s", self.client_id)
+        self.relay.attach_local_client(self)
         while self.running:
             ep = self.relay.spa()
             if ep is None or not self.relay.spa_online():
@@ -111,6 +109,9 @@ class StatusPoller:
                 self.errors += 1
                 LOG.exception("poller error")
                 time.sleep(2.0)
+            # Replies arrive on the relay's thread via deliver(), so this loop
+            # only has to keep time.
+            time.sleep(0.2)
 
     def _reset(self) -> None:
         self.connected = False
@@ -147,7 +148,6 @@ class StatusPoller:
                     self._target = self._candidates[self._cand_i % len(self._candidates)]
                     self._cand_i += 1
                     self.send_raw(P.build_tag("HELLO", "1"), note="poller discovery")
-            self.receive()
             return
 
         if not self._announced:
@@ -167,7 +167,6 @@ class StatusPoller:
                 self.send(b"APING")
             if now - self.last_full_refresh >= REFRESH_INTERVAL:
                 self.request_full_block()
-        self.receive()
 
     def _give_up_on_discovery(self) -> None:
         ep = self.relay.spa()
@@ -187,21 +186,15 @@ class StatusPoller:
         self.send(b"STATU" + bytes([self.next_seq()])
                   + (0).to_bytes(2, "big") + P.BLOCK_LEN.to_bytes(2, "big"))
 
-    def receive(self) -> None:
-        deadline = time.time() + 0.4
-        while time.time() < deadline:
-            try:
-                payload, addr = self.sock.recvfrom(8192)
-            except socket.timeout:
-                return
-            except OSError:
-                return
-            msg = P.parse(payload)
-            if msg is None:
-                continue
-            self.relay.events.add("in", f"{addr[0]}:{addr[1]}", msg, payload,
-                                  note="poller")
+    def deliver(self, msg: P.Message, addr: tuple[str, int]) -> None:
+        """Called from the relay's thread with a message meant for us."""
+        if not self.enabled or not self.running:
+            return
+        try:
             self.on_message(msg, addr)
+        except Exception:
+            self.errors += 1
+            LOG.exception("poller error handling %s", msg.verb or msg.kind)
 
     def on_message(self, msg: P.Message, addr: tuple[str, int]) -> None:
         if msg.kind == "HELLO":
@@ -261,7 +254,3 @@ class StatusPoller:
 
     def stop(self) -> None:
         self.running = False
-        try:
-            self.sock.close()
-        except OSError:
-            pass

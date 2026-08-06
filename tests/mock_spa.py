@@ -90,6 +90,11 @@ class GeckoMockServer:
         self.state = P.SpaStatus(block=default_block(),
                                  have=bytearray(b"\x01" * P.BLOCK_LEN))
         self.clients: dict[str, tuple[str, int]] = {}
+        # Clients that introduced themselves with <HELLO>{id}</HELLO>, i.e. over
+        # the LAN dialect. A real module answers those without naming them in
+        # DESCN, and answers cloud-dialect clients by name. The relay has to
+        # cope with both, so the mock reproduces both.
+        self.lan_clients: set[str] = set()
         self.cloud: tuple[str, int] | None = None
         self.cloud_interval = CLOUD_PING_INTERVAL
         self.cloud_acks = 0
@@ -118,7 +123,10 @@ class GeckoMockServer:
             LOG.warning("mock spa send failed: %s", exc)
 
     def reply(self, addr: tuple[str, int], data: bytes, dst: str) -> None:
-        self.send(addr, P.build_packt(data, self.spa_id, dst))
+        # LAN-dialect clients are answered without being named, exactly as a
+        # real in.touch2 module does.
+        self.send(addr, P.build_packt(data, self.spa_id,
+                                      "" if dst in self.lan_clients else dst))
 
     def serve_forever(self) -> None:
         LOG.info("mock spa %s listening on %s:%s", self.spa_id, *self.sock.getsockname())
@@ -171,6 +179,7 @@ class GeckoMockServer:
             self.send(addr, P.build_tag("HELLO", f"{self.spa_id}|{self.name}"))
         elif value and value != self.spa_id:
             self.add_client(value, addr)
+            self.lan_clients.add(value)
 
     def add_client(self, ident: str, addr) -> None:
         with self._lock:
