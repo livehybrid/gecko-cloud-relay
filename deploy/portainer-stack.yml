@@ -1,0 +1,53 @@
+# Docker Swarm stack for Portainer.
+#
+# Ports are published in host mode rather than through the routing mesh. That
+# is not a style choice: the ingress mesh source-NATs incoming packets, and the
+# relay identifies the EN module by its source address before the module ever
+# names itself. Through the mesh every module would look like the same client.
+#
+# The service is pinned to one node because the DNS override for
+# intouch.geckoal.com / intouch2.geckoal.com has to resolve to a fixed address.
+# Move both together or the module will talk to a node with nothing listening.
+
+services:
+  gecko-relay:
+    image: ghcr.io/livehybrid/gecko-cloud-relay:latest
+    environment:
+      GECKO_PORT: "10022"
+      GECKO_WEB_PORT: "8080"
+      GECKO_LOG_SIZE: "500"
+      # Pin once known, so the module is identified on its first keepalive
+      # instead of waiting for discovery.
+      # GECKO_SPA_ID: "SPA80:1f:12:50:a5:d1"
+      # GECKO_VERBOSE: "1"
+    ports:
+      - target: 10022
+        published: 10022
+        protocol: udp
+        mode: host
+      - target: 8080
+        published: 8080
+        protocol: tcp
+        mode: host
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.name==hpelite
+      restart_policy:
+        condition: any
+        delay: 10s
+      # A host-mode port cannot be held by two tasks at once, so the old task
+      # has to let go before the new one starts.
+      update_config:
+        order: stop-first
+        failure_action: rollback
+      resources:
+        limits:
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

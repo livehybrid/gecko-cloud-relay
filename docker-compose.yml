@@ -1,0 +1,16 @@
+# Standalone Docker. For the Swarm stack see deploy/portainer-stack.yml.
+services:
+  gecko-relay:
+    image: ghcr.io/livehybrid/gecko-cloud-relay:latest
+    # Swap the line above for `build: .` to run your working copy.
+    container_name: gecko-relay
+    # Host networking keeps the module's real source IP visible, which the
+    # relay uses to identify it before it names itself.
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      GECKO_PORT: "10022"
+      GECKO_WEB_PORT: "8080"
+      # Pin this once you know it, so the module is identified on first ping.
+      # GECKO_SPA_ID: "SPA80:1f:12:50:a5:d1"
+      # GECKO_VERBOSE: "1"
