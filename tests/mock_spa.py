@@ -123,10 +123,16 @@ class GeckoMockServer:
             LOG.warning("mock spa send failed: %s", exc)
 
     def reply(self, addr: tuple[str, int], data: bytes, dst: str) -> None:
-        # LAN-dialect clients are answered without being named, exactly as a
-        # real in.touch2 module does.
-        self.send(addr, P.build_packt(data, self.spa_id,
-                                      "" if dst in self.lan_clients else dst))
+        """Answer the way a real module does, which is not the obvious way.
+
+        A LAN-dialect client is answered without being named, and the answer
+        goes to the well known port rather than back to the port that asked.
+        Here that means the relay, which is what we were told the server is.
+        A cloud-dialect client is named in DESCN and answered where it asked.
+        """
+        lan = dst in self.lan_clients
+        target = self.cloud if (lan and self.cloud) else addr
+        self.send(target, P.build_packt(data, self.spa_id, "" if lan else dst))
 
     def serve_forever(self) -> None:
         LOG.info("mock spa %s listening on %s:%s", self.spa_id, *self.sock.getsockname())

@@ -185,6 +185,9 @@ def scenario_end_to_end():
           relay.packets_dropped == 0, relay.packets_dropped)
     check("poller is attached to the relay as the local client",
           relay.local_client is poller)
+    check("status came back through the relay, not the poller's own socket",
+          poller.via_relay > 0 and poller.via_socket == 0,
+          f"relay={poller.via_relay} direct={poller.via_socket}")
 
     # --- a client talking through the relay ------------------------------
     print("client relaying")
