@@ -156,6 +156,34 @@ Raw 648 is 36.0 °C, or 96.8 °F. Worth stating plainly because the obvious
 guess, tenths of °F, gives 64.8 °F and is wrong in a way that looks almost
 plausible.
 
+## How a module answers, which is not how you would guess
+
+Observed on a live in.touch2-EN (pack `inXM_C06`) once DNS was repointed at a
+relay. All three of these cost real debugging time, and each one fails silently.
+
+**It answers on port 10022, not to the port that asked.** A client polling from
+an ephemeral socket never hears anything back; the reply arrives at whatever is
+listening on 10022 at that address. A relay therefore has to hand replies to its
+own in-process clients rather than expect them to receive for themselves.
+
+**It answers a LAN-dialect client without naming it.** Requests carrying
+`SRCCN=client, DESCN=spa` come back as `SRCCN=spa, DESCN=` (empty). It does
+address cloud-dialect clients by name, so the two cases have to be told apart:
+an unaddressed reply belongs to whoever asked over the LAN dialect, and an
+addressed one is routed normally.
+
+**It will not serve the status block to port 10022.** Asking from there gets
+`SVERS` and `FILES` back but `STATU` is ignored entirely, with no error.
+Presumably the module treats that port as the server and declines to regard the
+server as a client. So requests must go out from an ephemeral socket even though
+the answers come back to 10022.
+
+**It remembers clients indefinitely.** A module that had a phone paired through
+Gecko's cloud kept sending that client `APING` every 2 seconds, through the
+relay, for as long as it was observed. Nothing can be done about that until the
+app reconnects, and it is a good reason for a client to keep a stable id rather
+than mint a new one per restart.
+
 ## What the cloud service appears to do
 
 From the captures, very little:

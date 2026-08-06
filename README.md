@@ -191,6 +191,18 @@ Disable it with `--no-poll` if you suspect it is interfering with Home Assistant
 or the phone app. Multiple concurrent clients are supported by the protocol, so
 it should not, but it is one more variable when debugging.
 
+**Status against real hardware.** The poller reads the module's version and pack
+file list reliably. Assembling the full status block has been seen to work but
+is not yet dependable, and the leading suspect is that the module had not been
+power-cycled since the DNS change: it keeps serving the session it already had,
+including pinging a phone client that Gecko's cloud gave it. Power-cycle the EN
+module after repointing DNS, which you should do anyway, before drawing any
+conclusion about the dashboard. None of this affects the relay itself; the
+keepalives and app relaying do not depend on the poller, and `--no-poll` turns
+it off entirely. `/api/state` reports `via_relay` and `via_socket` so you can
+see which path replies are taking. What the module does and does not answer is
+written up in [`docs/intouch2-protocol.md`](docs/intouch2-protocol.md).
+
 ---
 
 ## Dashboard
@@ -226,8 +238,14 @@ to a mock client and exercises the whole path:
 
 ```bash
 python3 tests/mock_spa.py --selftest    # 9 checks, the fixture itself
-python3 tests/test_relay.py             # 46 checks, no network access needed
+python3 tests/test_relay.py             # 50 checks, no network access needed
 ```
+
+The mock reproduces the module's awkward habits, not the convenient ones: it
+answers on the well known port rather than to whoever asked, and answers a
+LAN-dialect client without naming it. A friendlier mock is what let an earlier
+version of this pass its tests while being structurally unable to work against
+hardware.
 
 The mock is checked before the relay leans on it, so a broken fixture cannot
 masquerade as a broken relay.
