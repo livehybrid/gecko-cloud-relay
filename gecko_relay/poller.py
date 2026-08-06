@@ -51,6 +51,7 @@ LOG = logging.getLogger("gecko.poller")
 PING_INTERVAL = 2.0
 REFRESH_INTERVAL = 300.0
 HANDSHAKE_RETRY = 5.0
+HANDSHAKE_RETRY_MAX = 60.0     # back off rather than hammer a module that is not answering
 HELLO_RETRY = 2.0
 # If the module never answers discovery, stop waiting and talk to it the way the
 # original capture showed, with no DESCN. Better a degraded dashboard than none.
@@ -61,6 +62,11 @@ class StatusPoller:
     def __init__(self, relay, client_id: Optional[str] = None,
                  enabled: bool = True, spa_id: Optional[str] = None):
         self.relay = relay
+        # A module remembers its clients indefinitely: ours is still pinging a
+        # phone session it was given by Gecko's cloud long before this existed.
+        # So do not invent a fresh identity on every restart. Derive a stable
+        # one from the spa once it is known, and until then use a placeholder.
+        self.pinned_client_id = bool(client_id)
         self.client_id = client_id or f"GRLY{uuid.uuid4()}"
         self.enabled = enabled
         self.spa_id = spa_id or ""          # DESCN; learned by discovery if unset
@@ -91,6 +97,7 @@ class StatusPoller:
         self._announced = False
         self._last_hello = 0.0
         self._discovery_started = 0.0
+        self._handshake_backoff = HANDSHAKE_RETRY
         self._lock = threading.RLock()
 
     def next_seq(self) -> int:
@@ -158,6 +165,7 @@ class StatusPoller:
         self.connected = False
         self._announced = False
         self._discovery_started = time.time()
+        self._handshake_backoff = HANDSHAKE_RETRY
         LOG.info("poller targeting spa at %s:%s", *self._target)
 
     def pump(self) -> None:
@@ -178,21 +186,40 @@ class StatusPoller:
 
         if not self._announced:
             self._announced = True
+            self._settle_client_id()
             self.send_raw(P.build_tag("HELLO", self.client_id), note="poller announce")
 
         if not self.connected:
-            if now - self.last_ping > HANDSHAKE_RETRY:
+            if now - self.last_ping > self._handshake_backoff:
                 self.last_ping = now
-                LOG.info("poller starting handshake with %s", self.spa_id or "spa")
+                LOG.info("poller starting handshake with %s (retry in %.0fs if quiet)",
+                         self.spa_id or "spa", self._handshake_backoff)
                 self.send(b"SFILE" + bytes([self.next_seq()]))
                 self.send(b"AVERS" + bytes([self.next_seq()]))
                 self.request_full_block()
+                self._handshake_backoff = min(self._handshake_backoff * 1.5,
+                                              HANDSHAKE_RETRY_MAX)
         else:
             if now - self.last_ping >= PING_INTERVAL:
                 self.last_ping = now
                 self.send(b"APING")
             if now - self.last_full_refresh >= REFRESH_INTERVAL:
                 self.request_full_block()
+
+    def _settle_client_id(self) -> None:
+        """Adopt a client id that will be the same after a restart.
+
+        Derived from the spa so that two relays pointed at different spas do not
+        collide, and so redeploying does not leave another dead session behind
+        on a module that never forgets one.
+        """
+        if self.pinned_client_id or not self.spa_id:
+            return
+        stable = "GRLY" + str(uuid.uuid5(uuid.NAMESPACE_DNS,
+                                         "gecko-cloud-relay|" + self.spa_id))
+        if stable != self.client_id:
+            LOG.info("poller client id %s (stable, derived from the spa id)", stable)
+            self.client_id = stable
 
     def _give_up_on_discovery(self) -> None:
         ep = self.relay.spa()
@@ -259,6 +286,7 @@ class StatusPoller:
                 self.last_update = time.time()
                 if self.status.complete and not self.connected:
                     self.connected = True
+                    self._handshake_backoff = HANDSHAKE_RETRY
                     LOG.info("poller has a complete status block")
             elif msg.verb == "STATP":
                 changed = self.status.apply_statp(body)
