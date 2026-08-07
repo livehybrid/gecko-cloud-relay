@@ -350,6 +350,61 @@ def scenario_end_to_end():
     httpd.shutdown()
 
 
+def scenario_snooping():
+    """Learn the status block from an exchange we are only carrying.
+
+    The real module serves the phone app's request for the block and ignores
+    the byte-identical one from us. Since the answer crosses the relay anyway,
+    read it in passing. Modelled here by a client that asks and a poller that
+    never gets a reply of its own.
+    """
+    print()
+    print("snooping")
+    relay = GeckoCloudRelay(host="127.0.0.1", port=0)
+    relay_port = relay.sock.getsockname()[1]
+    threading.Thread(target=relay.serve_forever, daemon=True).start()
+    spa = start_spa(relay_port)
+
+    # Attached but never run, so it cannot ask for anything itself. That is the
+    # situation on the real module, which serves the app and ignores us.
+    poller = StatusPoller(relay, client_id="GRLYsnoop-0001")
+    relay.attach_local_client(poller)
+    wait_for(lambda: relay.spa() is not None, 8)
+
+    # A client the module is happy to serve, arriving the way the app does.
+    cli = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    cli.settimeout(4.0)
+    dest = ("127.0.0.1", relay_port)
+    cid = "IOSsnoop-0001"
+    # Name the module first, or nothing addressed to it by id can be routed.
+    cli.sendto(P.build_tag("ISTHR", mock_spa.SPA_ID), dest)
+    cli.recvfrom(4096)
+    cli.sendto(P.build_tag("BONJR", cid), dest)
+    wait_for(lambda: cid in relay.endpoints, 4)
+
+    before = poller.snooped
+    check("poller starts knowing nothing", not poller.status.complete)
+    cli.sendto(P.build_packt(b"STATU\x0d" + (0).to_bytes(2, "big")
+                             + P.BLOCK_LEN.to_bytes(2, "big"), cid, mock_spa.SPA_ID), dest)
+
+    ok = wait_for(lambda: poller.snooped > before, 8)
+    check("poller read the block from another client's exchange", ok, poller.snooped)
+    ok = wait_for(lambda: poller.status.complete, 8)
+    check("snooped block assembles completely", ok)
+    check("snooped block matches the module byte for byte",
+          bytes(poller.status.block) == bytes(spa.state.block))
+    check("poller counts itself connected once it has a full block",
+          poller.connected)
+    d = poller.as_dict()
+    check("set point decoded from snooped data",
+          d.get("setpoint_c") is not None and abs(d["setpoint_c"] - 36.0) < 0.05,
+          d.get("setpoint_c"))
+
+    relay.close()
+    poller.stop()
+    spa.running = False
+
+
 def scenario_partial_knowledge():
     """A module that pushes changes but will not dump the block.
 
@@ -381,6 +436,7 @@ def scenario_partial_knowledge():
 
 def main():
     scenario_identity()
+    scenario_snooping()
     scenario_partial_knowledge()
     scenario_end_to_end()
     print()

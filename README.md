@@ -66,11 +66,18 @@ Or with Docker:
 docker compose up -d
 ```
 
-Use host networking. The relay identifies the module by source address before
-the module ever names itself, so a NAT that rewrites the source will break
-identification. On Docker Swarm, publish the ports in `host` mode for the same
-reason: the ingress routing mesh source-NATs everything. See
-`deploy/portainer-stack.yml`.
+**Use host networking, and mean it.** The relay tracks every peer by source
+address and has to send to a client long after that client last spoke, so
+anything that rewrites the source breaks it in both directions.
+
+On Docker Swarm, publishing in `host` mode is *not* enough. The container still
+sits on an overlay, and traffic reaching it through Docker's proxy path arrives
+from the `docker_gwbridge` gateway rather than from the client: every remote
+client then looks like `10.0.1.1` and replies go to the bridge instead of to
+the phone. A module on the same LAN survives that, because it takes the DNAT
+path directly, so this looks fine right up until the first client connects from
+anywhere else. Join the host network instead, as `deploy/portainer-stack.yml`
+does.
 
 Dashboard: `http://<host>:8080/`
 
@@ -287,7 +294,7 @@ to a mock client and exercises the whole path:
 
 ```bash
 python3 tests/mock_spa.py --selftest    # 9 checks, the fixture itself
-python3 tests/test_relay.py             # 71 checks, no network access needed
+python3 tests/test_relay.py             # 77 checks, no network access needed
 ```
 
 The mock reproduces the module's awkward habits, not the convenient ones: it

@@ -109,6 +109,7 @@ class StatusPoller:
         # wrong for that firmware and the dashboard is running on luck.
         self.via_relay = 0
         self.via_socket = 0
+        self.snooped = 0
         self._target: Optional[tuple[str, int]] = None
         self._candidates: list[tuple[str, int]] = []
         self._cand_i = 0
@@ -291,6 +292,36 @@ class StatusPoller:
         self.send(b"STATU" + bytes([self.next_seq()])
                   + (0).to_bytes(2, "big") + P.BLOCK_LEN.to_bytes(2, "big"))
 
+    def snoop(self, msg: P.Message) -> None:
+        """Learn from a status block the module sent to somebody else.
+
+        This module answers the phone app's request for the block and ignores
+        the identical one from us, which is its prerogative. Every byte of the
+        answer crosses the relay on its way to the app, though, and reading it
+        in passing costs nothing and sends nothing. Being in the middle is the
+        one advantage this has over being a client.
+
+        Strictly read-only: no re-arm, no reply, no counters that would suggest
+        the module is talking to us when it is not.
+        """
+        if not self.enabled or not self.running or msg.kind != "PACKT":
+            return
+        body = msg.body
+        with self._lock:
+            if msg.verb == "STATV" and len(body) >= 3:
+                index, _nxt, ln = body[0], body[1], body[2]
+                self.status.apply_block(index, body[3:3 + ln])
+            elif msg.verb == "STATP":
+                if not self.status.apply_statp(body):
+                    return
+            else:
+                return
+            self.snooped += 1
+            self.last_update = time.time()
+            if self.status.complete and not self.connected:
+                self.connected = True
+                LOG.info("status block completed from traffic to another client")
+
     def deliver(self, msg: P.Message, addr: tuple[str, int],
                 direct: bool = False) -> None:
         """Handle a message meant for us, from the relay's thread or our own."""
@@ -366,6 +397,7 @@ class StatusPoller:
             "pack_files": self.pack_files,
             "errors": self.errors,
             "via_relay": self.via_relay,
+            "snooped": self.snooped,
             "via_socket": self.via_socket,
             "last_update_s": (round(time.time() - self.last_update, 1)
                               if self.last_update else None),

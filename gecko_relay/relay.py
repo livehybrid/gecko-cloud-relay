@@ -363,6 +363,11 @@ class GeckoCloudRelay:
         if msg.verb not in ("APING", "PACKS"):
             LOG.info("relay %-5s %s -> %s : %s", msg.verb,
                      msg.src or "?", target.ident, msg.describe())
+        if lc is not None and msg.src.startswith("SPA"):
+            # Read the spa's answer to somebody else on the way past. This
+            # module will not serve us the status block but does serve the app,
+            # and we are carrying it either way.
+            lc.snoop(msg)
         # Forward the original bytes untouched. The relay is a reflector, not a
         # participant, so anything we rewrite is a chance to break the session.
         self.send(target.addr, payload, note=f"relayed from {msg.src or '?'}")

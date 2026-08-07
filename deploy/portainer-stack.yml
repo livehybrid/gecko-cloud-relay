@@ -1,9 +1,20 @@
 # Docker Swarm stack for Portainer.
 #
-# Ports are published in host mode rather than through the routing mesh. That
-# is not a style choice: the ingress mesh source-NATs incoming packets, and the
-# relay identifies the EN module by its source address before the module ever
-# names itself. Through the mesh every module would look like the same client.
+# The service runs on the host's own network, with no publishing at all.
+#
+# This is not a preference, it is the only arrangement that works. The relay
+# tracks every peer by source address, and it has to send to a client long after
+# that client last spoke. Anything that rewrites the source breaks both halves.
+# Publishing in host mode is not enough: the container still sits on an overlay,
+# and traffic that reaches it through Docker's proxy path arrives from the
+# docker_gwbridge gateway instead of from the client. Every remote client then
+# looks like 10.0.1.1, and replies go to the bridge rather than to the phone.
+# The LAN module survives that because it hits the DNAT path directly; a client
+# arriving any other way does not, which is a difference you only find in
+# production.
+#
+# On the host network there is no DNAT, no masquerade and no proxy, so the relay
+# sees exactly what was sent and replies go straight back.
 #
 # The service is pinned to one node because the DNS override for
 # intouch.geckoal.com / intouch2.geckoal.com has to resolve to a fixed address.
@@ -20,15 +31,8 @@ services:
       # instead of waiting for discovery.
       # GECKO_SPA_ID: "SPA80:1f:12:50:a5:d1"
       # GECKO_VERBOSE: "1"
-    ports:
-      - target: 10022
-        published: 10022
-        protocol: udp
-        mode: host
-      - target: 8080
-        published: 8080
-        protocol: tcp
-        mode: host
+    networks:
+      - hostnet
     deploy:
       mode: replicated
       replicas: 1
@@ -38,8 +42,8 @@ services:
       restart_policy:
         condition: any
         delay: 10s
-      # A host-mode port cannot be held by two tasks at once, so the old task
-      # has to let go before the new one starts.
+      # Two tasks cannot hold port 10022 at once, so the old one has to let go
+      # before the new one starts.
       update_config:
         order: stop-first
         failure_action: rollback
@@ -51,3 +55,9 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+networks:
+  # Docker's own host network, joined rather than created.
+  hostnet:
+    external: true
+    name: host
