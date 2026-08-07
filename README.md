@@ -29,10 +29,17 @@ If you run Pi-hole as your DHCP or DNS server, a Pi-hole outage produces a red
 LED and looks exactly like "the internet broke my spa".
 
 **What taking over the cloud costs you.** Once the module points at this relay
-it is no longer talking to Gecko, so the phone app can no longer reach the spa
-from outside your network. On the LAN nothing is lost: the app finds the spa by
-broadcast and talks to it directly, and it works through this relay too. If
-remote access matters to you, this is the wrong tool.
+it is no longer talking to Gecko, so Gecko's own remote access is gone: the app
+on a mobile network, resolving `geckoal.com` publicly, will not find your spa.
+
+On the LAN nothing is lost. The app also works *through* the relay, which is the
+interesting part, and that has been confirmed against a real iOS client pulling
+a full status block and sending commands.
+
+So remote access is not lost so much as moved: if you can get onto your own
+network and use your own resolver, a VPN being the obvious way, the app reaches
+the spa through the relay exactly as it would at home. Confirmed working from an
+off-LAN client over WireGuard.
 
 **One thing still to confirm on your own hardware.** The module is assumed to
 resolve `intouch.geckoal.com` and `intouch2.geckoal.com` by DNS. If your
