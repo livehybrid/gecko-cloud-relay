@@ -199,7 +199,7 @@ PAGE = r"""<!doctype html>
       <div class="step">
         <button id="tdown" type="button" disabled aria-label="Lower the set point by 0.5 degrees">&minus;</button>
         <button id="tup" type="button" disabled aria-label="Raise the set point by 0.5 degrees">+</button>
-        <span class="lbl">Set point, 0.5 &deg;C steps</span>
+        <span class="lbl">Set point</span>
       </div>
       <div class="msg" id="tmsg" role="status" aria-live="polite"></div>
     </section>
@@ -341,13 +341,17 @@ PAGE = r"""<!doctype html>
     post({ action: 'press', button: name }, 'amsg', name);
   });
 
-  function nudge(delta) {
+  // Use the pack's own temp keys rather than computing a target here. Doing
+  // the arithmetic locally means every press is relative to whatever we last
+  // heard, so pressing twice quickly sends the same value twice and the second
+  // press appears to do nothing. The pack always knows its own set point.
+  function nudge(dir) {
     if (!canControl) { return; }
-    post({ action: 'setpoint', delta_c: delta }, 'tmsg',
-         'set point ' + (delta > 0 ? '+' : '') + delta + ' °C');
+    post({ action: 'press', button: dir > 0 ? 'tempup' : 'tempdown' }, 'tmsg',
+         'set point ' + (dir > 0 ? 'up' : 'down'));
   }
-  document.getElementById('tup').onclick = function () { nudge(0.5); };
-  document.getElementById('tdown').onclick = function () { nudge(-0.5); };
+  document.getElementById('tup').onclick = function () { nudge(1); };
+  document.getElementById('tdown').onclick = function () { nudge(-1); };
 
   function paint(d) {
     var r = d.relay, s = d.spa;

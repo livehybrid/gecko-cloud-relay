@@ -231,9 +231,12 @@ does and does not answer is written up in
 
 ### Driving the spa
 
-The accessory tiles are buttons, and the set point has a stepper. A press sends
-the same key code the topside panel sends, so it is indistinguishable from
-someone leaning over and pressing it. The spa answers with a change
+The accessory tiles are buttons, and the set point has a stepper. Both send the
+same key codes the topside panel sends, so a press is indistinguishable from
+someone leaning over and pressing it. The stepper deliberately uses the pack's
+own temp keys rather than computing a target: doing the arithmetic here makes
+every press relative to whatever we last heard, so two quick presses send the
+same value twice and the second appears to do nothing. The spa answers with a change
 notification, so the dashboard catches up on its own within about a second
 rather than guessing at the result.
 
@@ -261,6 +264,11 @@ refused with 503.
 | `GET /api/events?since=N` | Wire log entries after sequence N |
 | `GET /api/block` | The raw 637-byte status block as hex |
 | `POST /api/command` | Press a button or set the temperature |
+
+`/api/state` also carries `unanswered`: verbs a client asked for and never saw a
+reply to, with a sample of the raw bytes. A client that asks the same thing six
+times and is answered none of them is the shape of an app that sits there
+spinning, and this is how you find which verb it is.
 
 `/api/block` is the one to grab when something looks wrong. It is the whole
 truth about the spa in one string and can be decoded offline.
@@ -294,7 +302,7 @@ to a mock client and exercises the whole path:
 
 ```bash
 python3 tests/mock_spa.py --selftest    # 9 checks, the fixture itself
-python3 tests/test_relay.py             # 77 checks, no network access needed
+python3 tests/test_relay.py             # 84 checks, no network access needed
 ```
 
 The mock reproduces the module's awkward habits, not the convenient ones: it

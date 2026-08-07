@@ -307,6 +307,20 @@ def scenario_end_to_end():
     ok = wait_for(lambda: abs(poller.as_dict()["setpoint_c"] - 37.0) < 0.05, 8)
     check("relative set point nudge applied", ok, poller.as_dict()["setpoint_c"])
 
+    # The dashboard uses the pack's own temp keys, not arithmetic of its own.
+    # Two presses in a row must move it twice: computing a target locally makes
+    # the second press resend the first value and appear to do nothing.
+    start = poller.as_dict()["setpoint_c"]
+    command({"action": "press", "button": "tempup"})
+    ok = wait_for(lambda: abs(poller.as_dict()["setpoint_c"] - (start + 0.5)) < 0.05, 8)
+    check("temp up key raises the set point", ok, poller.as_dict()["setpoint_c"])
+    command({"action": "press", "button": "tempup"})
+    ok = wait_for(lambda: abs(poller.as_dict()["setpoint_c"] - (start + 1.0)) < 0.05, 8)
+    check("a second temp up press moves it again", ok, poller.as_dict()["setpoint_c"])
+    command({"action": "press", "button": "tempdown"})
+    ok = wait_for(lambda: abs(poller.as_dict()["setpoint_c"] - (start + 0.5)) < 0.05, 8)
+    check("temp down key lowers it", ok, poller.as_dict()["setpoint_c"])
+
     code, out = command({"action": "setpoint", "celsius": 90})
     check("absurd set point clamped rather than written",
           code == 200 and out["setpoint_c"] == 40.0, out)
@@ -399,6 +413,28 @@ def scenario_snooping():
     check("set point decoded from snooped data",
           d.get("setpoint_c") is not None and abs(d["setpoint_c"] - 36.0) < 0.05,
           d.get("setpoint_c"))
+
+    # A notification for a client that has gone away is still true. Dropping it
+    # unread is how the dashboard ends up holding a stale set point while the
+    # spa has moved on, which is what made repeated presses look broken.
+    relay.endpoints.pop(cid, None)
+    before = poller.snooped
+    spa.notify(spa.keypress(0x01))
+    ok = wait_for(lambda: poller.snooped > before, 6)
+    check("learns from a notification it cannot deliver", ok)
+    ok = wait_for(lambda: poller.as_dict()["pumps"][0]["state"] == 2, 6)
+    check("undeliverable notification still updated the state", ok,
+          poller.as_dict()["pumps"][0])
+
+    # And the accounting that answers "what are we not replying to".
+    relay.note_traffic(cid, "ZZTOP", "sent", b"ZZTOPpayload")
+    miss = relay.unanswered().get(cid) or {}
+    check("an unknown unanswered verb is flagged with a sample",
+          "ZZTOP" in miss and miss["ZZTOP"]["sample"], miss.get("ZZTOP"))
+    relay.note_traffic(cid, "AVERS", "sent", b"AVERS\x01")
+    relay.note_traffic(cid, "SVERS", "recv")
+    check("a verb that did get its answer is not flagged",
+          "AVERS" not in (relay.unanswered().get(cid) or {}))
 
     relay.close()
     poller.stop()

@@ -30,6 +30,17 @@ PING_STALE_AFTER = 90.0      # EN pings every ~21 s; 4 misses and we call it gon
 UNROUTABLE_LOG_FIRST = 3
 UNROUTABLE_LOG_EVERY = 250
 
+# Which reply each request verb expects, so an unanswered one can be spotted.
+ANSWERS_TO_REQUEST = {
+    "AVERS": {"SVERS"},
+    "SFILE": {"FILES"},
+    "STATU": {"STATV"},
+    "APING": {"PACKS"},
+    "STATQ": {"STATP"},
+    "CURCH": {"CHCUR"},
+    "SETCH": {"CHSET"},
+}
+
 
 @dataclass
 class Endpoint:
@@ -110,6 +121,10 @@ class GeckoCloudRelay:
         self.local_client = None                 # in-process client, i.e. the poller
         self.unroutable: dict[str, int] = {}      # dst id -> how many we have dropped
         self.last_client_statu: Optional[dict] = None  # a known-good block request
+        # Per client: what it asked for, what came back, and a sample of any
+        # verb we have no idea about. An app that sends a verb six times and is
+        # answered none of them is the shape of a spinner.
+        self.client_traffic: dict[str, dict] = {}
         self.events = EventLog(log_size)
         self.started = time.time()
         self.packets_in = 0
@@ -179,6 +194,59 @@ class GeckoCloudRelay:
             self.by_addr[addr] = ident
             return ep
 
+    def is_noise(self, msg: P.Message) -> bool:
+        """Traffic for a client that has never been here and keeps being retried.
+
+        A module holds its sessions forever and retries hard when nothing
+        answers, so this can be several a second indefinitely. Logging it fills
+        the ring and pushes out the traffic anyone actually wants to read.
+        """
+        if msg is None or msg.kind != "PACKT" or not msg.dst:
+            return False
+        if self.unroutable.get(msg.dst, 0) <= UNROUTABLE_LOG_FIRST:
+            return False
+        with self.lock:
+            return msg.dst not in self.endpoints
+
+    def note_traffic(self, client: str, verb: str, direction: str,
+                     data: bytes = b"") -> None:
+        """Record a client's request or its answer, keeping one sample of each."""
+        if not client or not verb:
+            return
+        with self.lock:
+            t = self.client_traffic.setdefault(
+                client, {"sent": {}, "recv": {}, "samples": {}})
+            t[direction][verb] = t[direction].get(verb, 0) + 1
+            if direction == "sent" and verb not in t["samples"] and data:
+                t["samples"][verb] = data[:64].hex()
+
+    def unanswered(self) -> dict:
+        """Verbs a client asked for and never saw an answer to.
+
+        Paired by verb and not by sequence number, deliberately: the case worth
+        catching is a verb asked repeatedly and answered never, and that needs
+        nothing cleverer. A verb we have no mapping for is reported too, with a
+        sample, since an unknown request going unanswered is exactly the shape
+        of an app that sits there spinning.
+        """
+        out = {}
+        with self.lock:
+            for client, t in self.client_traffic.items():
+                answered = set(t["recv"])
+                missing = {}
+                for verb, n in t["sent"].items():
+                    expects = ANSWERS_TO_REQUEST.get(verb)
+                    if expects is None:
+                        if verb not in answered:
+                            missing[verb] = {"asked": n, "expects": None,
+                                             "sample": t["samples"].get(verb)}
+                    elif not (expects & answered):
+                        missing[verb] = {"asked": n, "expects": sorted(expects),
+                                         "sample": t["samples"].get(verb)}
+                if missing:
+                    out[client] = missing
+        return out
+
     def attach_local_client(self, client) -> None:
         """Register a client living inside this process, i.e. the status poller.
 
@@ -243,7 +311,8 @@ class GeckoCloudRelay:
             return
 
         LOG.debug("RX <- %s %s", peer, msg.describe())
-        self.events.add("in", peer, msg, payload)
+        if not self.is_noise(msg):
+            self.events.add("in", peer, msg, payload)
 
         if msg.kind == "PINGS":
             self.on_pings(msg, addr)
@@ -310,6 +379,9 @@ class GeckoCloudRelay:
                 self.register(msg.src, addr, "spa")
         elif msg.src:
             self.register(msg.src, addr, "client")
+            self.note_traffic(msg.src, msg.verb, "sent", msg.data)
+        if msg.src.startswith("SPA") and msg.dst:
+            self.note_traffic(msg.dst, msg.verb, "recv")
 
         # The phone app can read the status block from a module that refuses us.
         # Keep the exact bytes of its request so the difference can be seen
@@ -328,6 +400,13 @@ class GeckoCloudRelay:
             LOG.info("captured a client STATU: %s", self.last_client_statu)
 
         lc = self.local_client
+        if lc is not None and msg.src.startswith("SPA"):
+            # Learn from anything the spa says, before working out whether it
+            # can be delivered. A notification addressed to an app that has
+            # since gone away is still true, and dropping it unread is how the
+            # dashboard ends up quietly holding a stale set point.
+            lc.snoop(msg)
+
         if lc is not None and msg.src.startswith("SPA") and (
                 msg.dst == getattr(lc, "client_id", None) or not msg.dst):
             # Either addressed to the poller, which is how the module answers a
@@ -363,11 +442,6 @@ class GeckoCloudRelay:
         if msg.verb not in ("APING", "PACKS"):
             LOG.info("relay %-5s %s -> %s : %s", msg.verb,
                      msg.src or "?", target.ident, msg.describe())
-        if lc is not None and msg.src.startswith("SPA"):
-            # Read the spa's answer to somebody else on the way past. This
-            # module will not serve us the status block but does serve the app,
-            # and we are carrying it either way.
-            lc.snoop(msg)
         # Forward the original bytes untouched. The relay is a reflector, not a
         # participant, so anything we rewrite is a chance to break the session.
         self.send(target.addr, payload, note=f"relayed from {msg.src or '?'}")
@@ -401,6 +475,7 @@ class GeckoCloudRelay:
             "packets_dropped": self.packets_dropped,
             "unroutable": dict(self.unroutable),
             "last_client_statu": self.last_client_statu,
+            "unanswered": self.unanswered(),
             "endpoints": [e.as_dict() for e in self.endpoints.values()],
             "bindings": dict(self.bindings),
         }
