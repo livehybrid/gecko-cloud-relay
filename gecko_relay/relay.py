@@ -108,7 +108,8 @@ class EventLog:
 class GeckoCloudRelay:
     def __init__(self, host: str = "0.0.0.0", port: int = P.PORT,
                  log_size: int = 500, spa_id: Optional[str] = None,
-                 answer_discovery: bool = False):
+                 answer_discovery: bool = False,
+                 upstream: Optional[tuple] = None):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -119,6 +120,10 @@ class GeckoCloudRelay:
         self.bindings: dict[str, str] = {}       # client id -> spa id
         self.expected_spa_id = spa_id            # optional pin, from --spa-id
         self.answer_discovery = answer_discovery  # see on_hello; off for a reason
+        # Gecko's real service, if we are also forwarding to it. See to_upstream.
+        self.upstream = upstream
+        self.upstream_tx = 0
+        self.upstream_rx = 0
         self.pending_binding: dict[tuple, str] = {}   # addr -> spa id from ISTHR
         self.local_client = None                 # in-process client, i.e. the poller
         self.unroutable: dict[str, int] = {}      # dst id -> how many we have dropped
@@ -249,6 +254,23 @@ class GeckoCloudRelay:
                     out[client] = missing
         return out
 
+    def is_upstream(self, addr: tuple[str, int]) -> bool:
+        return self.upstream is not None and addr[0] == self.upstream[0]
+
+    def to_upstream(self, payload: bytes, note: str = "") -> bool:
+        """Pass a datagram on to Gecko's own service.
+
+        Sent from the relay's own socket, on port 10022, because that is exactly
+        what the module would do if it were talking to them directly. Keeping
+        the source port identical keeps one stable NAT mapping open, which is
+        the whole reason their replies find their way back.
+        """
+        if self.upstream is None:
+            return False
+        self.upstream_tx += 1
+        self.send(self.upstream, payload, note=("to cloud " + note).strip())
+        return True
+
     def attach_local_client(self, client) -> None:
         """Register a client living inside this process, i.e. the status poller.
 
@@ -312,12 +334,17 @@ class GeckoCloudRelay:
             self.events.add("in", peer, None, payload, note="unrecognised")
             return
 
+        from_upstream = self.is_upstream(addr)
+        if from_upstream:
+            self.upstream_rx += 1
+
         LOG.debug("RX <- %s %s", peer, msg.describe())
         if not self.is_noise(msg):
-            self.events.add("in", peer, msg, payload)
+            self.events.add("in", peer, msg, payload,
+                            note="from cloud" if from_upstream else "")
 
         if msg.kind == "PINGS":
-            self.on_pings(msg, addr)
+            self.on_pings(msg, addr, from_upstream)
         elif msg.kind == "ISTHR":
             self.on_isthr(msg, addr)
         elif msg.kind == "BONJR":
@@ -325,17 +352,26 @@ class GeckoCloudRelay:
         elif msg.kind == "HELLO":
             self.on_hello(msg, addr)
         elif msg.kind == "PACKT":
-            self.on_packt(msg, addr, payload)
+            self.on_packt(msg, addr, payload, from_upstream)
         else:
             LOG.info("no handler for <%s> from %s", msg.kind, peer)
 
     # -- handlers ----------------------------------------------------------
 
-    def on_pings(self, msg: P.Message, addr) -> None:
+    def on_pings(self, msg: P.Message, addr, from_upstream: bool = False) -> None:
         """The EN keepalive. Answering this is what keeps its LED blue."""
+        if from_upstream:
+            # Gecko acknowledging the keepalive we passed on. The module already
+            # has its answer from us, so there is nothing to forward.
+            return
         if msg.value == b"1":
             self.register_ping_source(addr)
             self.send(addr, P.build_tag("PINGS", "0"), note="keepalive ack")
+            # Answer first, then tell Gecko. Answering locally is what keeps the
+            # spa working when the internet does not, and passing it on is what
+            # keeps our session with them alive so the app can still get in from
+            # outside. Neither depends on the other.
+            self.to_upstream(msg.raw, note="keepalive")
 
     def on_isthr(self, msg: P.Message, addr) -> None:
         """A client asking whether a given spa is reachable."""
@@ -390,7 +426,23 @@ class GeckoCloudRelay:
             # port 10022 rather than to whoever asked.
             self.local_client.deliver(msg, addr)
 
-    def on_packt(self, msg: P.Message, addr, payload: bytes) -> None:
+    def on_packt(self, msg: P.Message, addr, payload: bytes,
+                 from_upstream: bool = False) -> None:
+        if from_upstream:
+            # Anything Gecko sends us is for the spa, or for a client of ours.
+            # A remote client registers at the cloud's address, which is exactly
+            # right: it is reachable through them and the module's replies will
+            # route back the same way without any special case.
+            if msg.src and not msg.src.startswith("SPA"):
+                self.register(msg.src, addr, "client")
+            target = self.resolve_target(msg) or self.spa()
+            if target is None:
+                self.packets_dropped += 1
+                LOG.warning("nothing to give cloud traffic to (dst=%r)", msg.dst)
+                return
+            self.send(target.addr, payload, note="from cloud")
+            return
+
         if msg.src.startswith("SPA"):
             # The module has named itself; upgrade any provisional entry.
             if not self.adopt_identity(msg.src, addr):
@@ -436,6 +488,12 @@ class GeckoCloudRelay:
 
         target = self.resolve_target(msg)
         if target is None:
+            # Not anybody here. If we are also talking to Gecko, this is very
+            # likely for a client of theirs, which is how the app reaches the
+            # spa from outside. It also disposes of the retries aimed at a
+            # session the module was given before this relay existed.
+            if self.to_upstream(payload, note=f"for {msg.dst or '?'}"):
+                return
             self.packets_dropped += 1
             if not msg.dst:
                 LOG.warning("cannot route %s from %s (no dst)", msg.verb, msg.src)
@@ -494,6 +552,9 @@ class GeckoCloudRelay:
             "unroutable": dict(self.unroutable),
             "last_client_statu": self.last_client_statu,
             "unanswered": self.unanswered(),
+            "upstream": ("%s:%s" % self.upstream) if self.upstream else None,
+            "upstream_tx": self.upstream_tx,
+            "upstream_rx": self.upstream_rx,
             "endpoints": [e.as_dict() for e in self.endpoints.values()],
             "bindings": dict(self.bindings),
         }

@@ -28,6 +28,10 @@ die. Check the EN module's status LED before building anything:
 If you run Pi-hole as your DHCP or DNS server, a Pi-hole outage produces a red
 LED and looks exactly like "the internet broke my spa".
 
+**You can have both.** `--upstream` forwards to Gecko's own service as well as
+answering locally, which keeps remote access working. See below. The rest of
+this section describes what you give up without it.
+
 **What taking over the cloud costs you.** Once the module points at this relay
 it is no longer talking to Gecko, so Gecko's own remote access is gone: the app
 on a mobile network, resolving `geckoal.com` publicly, will not find your spa.
@@ -93,6 +97,8 @@ from a stack file than a command line.
 | `--no-web` | `GECKO_NO_WEB` | off | Skip the dashboard |
 | `--no-poll` | `GECKO_NO_POLL` | off | Do not join as a client. Use if you suspect the poller is interfering. |
 | `--spa-id` | `GECKO_SPA_ID` | discovered | Pin the spa id so the module is identified on its first ping |
+| `--upstream` | `GECKO_UPSTREAM` | off | Also forward to Gecko's own service, so the app keeps working from outside |
+| `--upstream-dns` | `GECKO_UPSTREAM_DNS` | system | Resolver to look `--upstream` up with. Needed, because your own DNS points that name here |
 | `--answer-discovery` | `GECKO_ANSWER_DISCOVERY` | off | Answer LAN `<HELLO>1</HELLO>` broadcasts. Leave it off: see below. |
 | `--client-id` | `GECKO_CLIENT_ID` | derived from the spa id | Client id used by the status poller. The default is stable across restarts on purpose: a module remembers its clients indefinitely. |
 | `--log-size` | `GECKO_LOG_SIZE` | 500 | Wire log ring buffer |
@@ -156,6 +162,40 @@ iptables -t nat -A POSTROUTING -d 192.168.0.50 -p udp --dport 10022 -j MASQUERAD
 
 Note the MASQUERADE line defeats source-address identification, so pass
 `--spa-id` when using this form.
+
+---
+
+## Keeping remote access: `--upstream`
+
+Point the module here and Gecko no longer knows where your spa is, so their app
+cannot reach it from outside. `--upstream` fixes that by being a proxy as well
+as a replacement:
+
+```bash
+python3 -m gecko_relay --upstream intouch2.geckoal.com --upstream-dns 1.1.1.1
+```
+
+The module's keepalive is **answered here first and only then passed on**. That
+ordering is the whole design: the spa keeps working when your internet does
+not, and the session with Gecko stays alive so the app can still get in from
+outside. Neither depends on the other.
+
+Traffic for a client nobody here has heard of is forwarded to Gecko rather than
+dropped, because it is very probably one of theirs. Their traffic on the way
+back is delivered to the spa, or to a local client if it names one. A remote
+client is tracked at Gecko's address, so the module's replies route back the
+same way with no special case.
+
+`--upstream-dns` is not optional in practice. You have just told your own
+resolver that `intouch2.geckoal.com` is this machine, so asking it again gets
+you your own address and the relay forwards to itself. It refuses to start if
+it notices, but pointing it at a resolver that has not been lied to is better.
+Passing an address directly works too.
+
+Two honest caveats. Your spa's traffic goes to Gecko again, which is some of
+what you were avoiding, though only while you want remote access. And their
+service was never designed to be proxied: there is no authentication in any of
+this, so it ought to work, but it is not something anyone can promise.
 
 ---
 
@@ -316,7 +356,7 @@ to a mock client and exercises the whole path:
 
 ```bash
 python3 tests/mock_spa.py --selftest    # 9 checks, the fixture itself
-python3 tests/test_relay.py             # 85 checks, no network access needed
+python3 tests/test_relay.py             # 97 checks, no network access needed
 ```
 
 The mock reproduces the module's awkward habits, not the convenient ones: it

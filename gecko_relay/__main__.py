@@ -17,6 +17,7 @@ import threading
 
 from . import __version__
 from . import protocol as P
+from .upstream import UpstreamError, resolve_upstream
 from .poller import StatusPoller
 from .relay import GeckoCloudRelay
 from .web import start_web
@@ -54,6 +55,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Pin the spa id, e.g. SPA80:1f:12:50:a5:d1")
     p.add_argument("--client-id", default=_env("CLIENT_ID"),
                    help="Client id used by the status poller (default: random)")
+    p.add_argument("--upstream", default=_env("UPSTREAM"),
+                   help="Also forward to Gecko's own service, e.g. "
+                        "intouch2.geckoal.com or 23.101.153.137. Keeps remote "
+                        "access working; local control no longer depends on it")
+    p.add_argument("--upstream-dns", default=_env("UPSTREAM_DNS"),
+                   help="Resolver to look --upstream up with, e.g. 1.1.1.1. "
+                        "Needed when your own DNS points those names back here")
     p.add_argument("--answer-discovery", action="store_true",
                    default=_env_flag("ANSWER_DISCOVERY"),
                    help="Answer LAN <HELLO>1</HELLO> broadcasts. Off by default: "
@@ -78,10 +86,22 @@ def main(argv=None) -> int:
     )
     LOG.info("gecko-cloud-relay %s", __version__)
 
+    upstream = None
+    if args.upstream:
+        try:
+            upstream = resolve_upstream(args.upstream, args.upstream_dns,
+                                        our_port=args.port)
+        except UpstreamError as exc:
+            LOG.error("--upstream %s: %s", args.upstream, exc)
+            return 1
+        LOG.info("forwarding to Gecko at %s:%s as well as answering locally",
+                 *upstream)
+
     try:
         relay = GeckoCloudRelay(host=args.host, port=args.port,
                                 log_size=args.log_size, spa_id=args.spa_id,
-                                answer_discovery=args.answer_discovery)
+                                answer_discovery=args.answer_discovery,
+                                upstream=upstream)
     except OSError as exc:
         LOG.error("cannot bind %s:%s (%s)", args.host, args.port, exc)
         if args.port < 1024:

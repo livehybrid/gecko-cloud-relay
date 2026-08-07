@@ -27,6 +27,14 @@ services:
       GECKO_PORT: "10022"
       GECKO_WEB_PORT: "8080"
       GECKO_LOG_SIZE: "500"
+      # Also forward to Gecko's own service, so the app still works from
+      # outside the network. Local control does not depend on this: the module
+      # is answered here first and only then passed on.
+      GECKO_UPSTREAM: "intouch2.geckoal.com"
+      # Resolve that name somewhere honest. Our own DNS points it back at this
+      # relay, which is the entire point of the exercise and would otherwise
+      # make it forward to itself.
+      GECKO_UPSTREAM_DNS: "1.1.1.1"
       # Pin once known, so the module is identified on its first keepalive
       # instead of waiting for discovery.
       # GECKO_SPA_ID: "SPA80:1f:12:50:a5:d1"

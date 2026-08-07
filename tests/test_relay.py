@@ -30,6 +30,7 @@ from gecko_relay import protocol as P            # noqa: E402
 from gecko_relay.relay import GeckoCloudRelay    # noqa: E402
 from gecko_relay.poller import StatusPoller      # noqa: E402
 from gecko_relay.web import start_web            # noqa: E402
+from gecko_relay import upstream as U            # noqa: E402
 import mock_spa                                  # noqa: E402
 
 FAILURES = []
@@ -455,6 +456,100 @@ def scenario_snooping():
     spa.running = False
 
 
+def scenario_upstream():
+    """Forward to Gecko as well, so the app still works from outside.
+
+    Answering the module locally and passing its keepalive on are independent:
+    the spa keeps working when the internet does not, and the session with
+    Gecko stays alive so a remote client can still get in.
+    """
+    print()
+    print("upstream forwarding")
+
+    # A distinct loopback address, because the relay tells the cloud apart from
+    # everything else by source IP. That is the right test for the real thing,
+    # where the spa is on the LAN and Gecko is out on the internet, but it does
+    # mean the mock cloud cannot share 127.0.0.1 with the mock spa.
+    cloud = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    cloud.bind(("127.0.0.2", 0))
+    cloud.settimeout(6.0)
+    cloud_addr = cloud.getsockname()
+
+    relay = GeckoCloudRelay(host="127.0.0.1", port=0, upstream=cloud_addr)
+    relay_port = relay.sock.getsockname()[1]
+    threading.Thread(target=relay.serve_forever, daemon=True).start()
+    spa = start_spa(relay_port)
+    dest = ("127.0.0.1", relay_port)
+
+    ok = wait_for(lambda: relay.spa() is not None, 8)
+    check("spa still reaches the relay with upstream on", ok)
+
+    # The keepalive must be answered here AND passed on.
+    seen = []
+    deadline = time.time() + 6
+    while time.time() < deadline and not seen:
+        try:
+            data, _ = cloud.recvfrom(4096)
+        except socket.timeout:
+            break
+        if data == b"<PINGS>1</PINGS>":
+            seen.append(data)
+    check("keepalive forwarded to the cloud", bool(seen), seen)
+    check("and still answered locally, so the spa does not need the cloud",
+          spa.cloud_acks > 0, spa.cloud_acks)
+
+    # Traffic for a client we have never heard of goes to the cloud rather than
+    # the floor: that client is very likely theirs.
+    before = relay.upstream_tx
+    remote = "IOSsomewhere-else"
+    spa.send(("127.0.0.1", relay_port),
+             P.build_packt(b"APING", mock_spa.SPA_ID, remote))
+    ok = wait_for(lambda: relay.upstream_tx > before, 6)
+    check("traffic for an unknown client is forwarded to the cloud", ok)
+    check("and not counted as dropped", relay.packets_dropped == 0,
+          relay.packets_dropped)
+
+    # And the return path: the cloud speaking on behalf of a remote client.
+    cloud.sendto(P.build_packt(b"SFILE\x01", remote, mock_spa.SPA_ID), dest)
+    got = None
+    deadline = time.time() + 6
+    while time.time() < deadline:
+        try:
+            data, _ = cloud.recvfrom(4096)
+        except socket.timeout:
+            break
+        m = P.parse(data)
+        if m and m.verb == "FILES":
+            got = m
+            break
+    check("a remote client reaches the spa through the cloud", got is not None)
+    check("and the spa's answer comes back addressed to it",
+          got is not None and got.dst == remote, got.dst if got else None)
+    check("the remote client is tracked at the cloud's address",
+          relay.endpoints.get(remote) is not None
+          and relay.endpoints[remote].addr[1] == cloud_addr[1])
+
+    relay.close()
+    spa.running = False
+    cloud.close()
+
+    print("upstream resolution")
+    try:
+        U.resolve_upstream("127.0.0.1")
+        check("refuses to forward to itself", False, "no error raised")
+    except U.UpstreamError as exc:
+        check("refuses to forward to itself", "this host" in str(exc) or "loopback" in str(exc).lower(), exc)
+    check("accepts an address and port",
+          U.resolve_upstream("23.101.153.137:10022") == ("23.101.153.137", 10022))
+    check("defaults to the in.touch2 port",
+          U.resolve_upstream("23.101.153.137") == ("23.101.153.137", P.PORT))
+    try:
+        U.resolve_upstream("23.101.153.137:nonsense")
+        check("rejects a bad port", False, "no error raised")
+    except U.UpstreamError:
+        check("rejects a bad port", True)
+
+
 def scenario_partial_knowledge():
     """A module that pushes changes but will not dump the block.
 
@@ -487,6 +582,7 @@ def scenario_partial_knowledge():
 def main():
     scenario_identity()
     scenario_snooping()
+    scenario_upstream()
     scenario_partial_knowledge()
     scenario_end_to_end()
     print()
