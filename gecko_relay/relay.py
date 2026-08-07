@@ -310,13 +310,14 @@ class GeckoCloudRelay:
         elif msg.src:
             self.register(msg.src, addr, "client")
 
-        if (self.local_client is not None and msg.src.startswith("SPA")
-                and not msg.dst):
-            # The module answers a LAN-dialect request without naming the
-            # recipient, so an unaddressed reply from the spa belongs to the
-            # only LAN-dialect client here: the poller. App traffic coming
-            # through the relay is addressed by DESCN and never lands here.
-            self.local_client.deliver(msg, addr)
+        lc = self.local_client
+        if lc is not None and msg.src.startswith("SPA") and (
+                msg.dst == getattr(lc, "client_id", None) or not msg.dst):
+            # Either addressed to the poller, which is how the module answers a
+            # client whose traffic arrives from the cloud side, or unaddressed,
+            # which is how it answers a LAN-dialect one. The poller is the only
+            # client living in this process, so both belong to it.
+            lc.deliver(msg, addr)
             return
 
         target = self.resolve_target(msg)

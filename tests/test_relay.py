@@ -177,11 +177,14 @@ def scenario_end_to_end():
     check("all pumps read as off", all(p["state"] == 0 for p in d["pumps"]))
     check("poller block matches the module byte for byte",
           bytes(poller.status.block) == bytes(spa.state.block))
-    # The module answers a LAN-dialect client without naming it, and answers on
-    # the well known port rather than to whoever asked. Both together mean the
-    # poller cannot own a socket: its replies arrive on the relay's. Guard the
+    # The poller must look like the app, not like a client on the LAN. A module
+    # puts anything that announces itself with HELLO into a LAN bucket and then
+    # refuses it the status block entirely, with no error to go on. Guard the
     # whole path, because getting it wrong looks like a silent empty dashboard.
-    check("module answers the poller without naming it", poller.client_id in spa.lan_clients)
+    check("poller is not registered as a LAN-dialect client",
+          poller.client_id not in spa.lan_clients, spa.lan_clients)
+    check("module answers the poller by name, as it does the app",
+          poller.client_id in spa.clients, list(spa.clients))
     check("relay delivered those unaddressed replies rather than dropping them",
           relay.packets_dropped == 0, relay.packets_dropped)
     check("poller is attached to the relay as the local client",
