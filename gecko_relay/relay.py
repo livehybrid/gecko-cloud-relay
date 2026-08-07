@@ -109,6 +109,7 @@ class GeckoCloudRelay:
         self.pending_binding: dict[tuple, str] = {}   # addr -> spa id from ISTHR
         self.local_client = None                 # in-process client, i.e. the poller
         self.unroutable: dict[str, int] = {}      # dst id -> how many we have dropped
+        self.last_client_statu: Optional[dict] = None  # a known-good block request
         self.events = EventLog(log_size)
         self.started = time.time()
         self.packets_in = 0
@@ -310,6 +311,22 @@ class GeckoCloudRelay:
         elif msg.src:
             self.register(msg.src, addr, "client")
 
+        # The phone app can read the status block from a module that refuses us.
+        # Keep the exact bytes of its request so the difference can be seen
+        # rather than guessed at; it is the only known-good example we get.
+        if (msg.verb == "STATU" and msg.src
+                and not msg.src.startswith("SPA")
+                and msg.src != getattr(self.local_client, "client_id", None)):
+            body = msg.body
+            self.last_client_statu = {
+                "from": msg.src,
+                "datas_hex": msg.data.hex(),
+                "start": int.from_bytes(body[1:3], "big") if len(body) >= 5 else None,
+                "length": int.from_bytes(body[3:5], "big") if len(body) >= 5 else None,
+                "at": time.time(),
+            }
+            LOG.info("captured a client STATU: %s", self.last_client_statu)
+
         lc = self.local_client
         if lc is not None and msg.src.startswith("SPA") and (
                 msg.dst == getattr(lc, "client_id", None) or not msg.dst):
@@ -378,6 +395,7 @@ class GeckoCloudRelay:
             "packets_out": self.packets_out,
             "packets_dropped": self.packets_dropped,
             "unroutable": dict(self.unroutable),
+            "last_client_statu": self.last_client_statu,
             "endpoints": [e.as_dict() for e in self.endpoints.values()],
             "bindings": dict(self.bindings),
         }
