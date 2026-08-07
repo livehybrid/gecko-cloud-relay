@@ -220,31 +220,50 @@ class SpaStatus:
     def pump_demand(self, n: int) -> int:
         return self._field(OFF_PUMP_DEMAND, PUMP_DEMAND_SHIFT[n])
 
+    def has(self, off: int, width: int = 1) -> bool:
+        """Have we actually been told these bytes?
+
+        A module that pushes change notifications but declines to dump the whole
+        block leaves us knowing some fields and not others. Reporting an
+        undelivered field as zero turns a 34 degree set point into 0.0, which
+        looks like a fault rather than like ignorance.
+        """
+        return all(self.have[off:off + width])
+
+    def _byte(self, off: int) -> Optional[int]:
+        return self.block[off] if self.has(off) else None
+
+    def _temp(self, off: int) -> Optional[int]:
+        return self.word(off) if self.has(off, 2) else None
+
     def as_dict(self) -> dict:
         if not any(self.have):
             return {"known": False}
-        sp = self.word(OFF_SETPOINT)
-        wt = self.word(OFF_WATER_TEMP)
-        ht = self.word(OFF_HEATER_TEMP)
+        sp, wt, ht = (self._temp(o) for o in
+                      (OFF_SETPOINT, OFF_WATER_TEMP, OFF_HEATER_TEMP))
+        have_pumps = self.has(OFF_PUMP_STATUS)
         return {
             "known": True,
             "complete": self.complete,
-            "setpoint_c": round(raw_to_c(sp), 1),
-            "setpoint_f": round(raw_to_f(sp), 1),
+            "setpoint_c": round(raw_to_c(sp), 1) if sp is not None else None,
+            "setpoint_f": round(raw_to_f(sp), 1) if sp is not None else None,
             "setpoint_raw": sp,
-            "water_c": round(raw_to_c(wt), 1),
-            "water_f": round(raw_to_f(wt), 1),
-            "heater_c": round(raw_to_c(ht), 1),
+            "water_c": round(raw_to_c(wt), 1) if wt is not None else None,
+            "water_f": round(raw_to_f(wt), 1) if wt is not None else None,
+            "heater_c": round(raw_to_c(ht), 1) if ht is not None else None,
             "pumps": [
-                {"n": n, "state": self.pump(n), "demand": self.pump_demand(n)}
+                {"n": n,
+                 "state": self.pump(n) if have_pumps else None,
+                 "demand": (self.pump_demand(n)
+                            if self.has(OFF_PUMP_DEMAND) else None)}
                 for n in (1, 2, 3)
             ],
-            "aux": self._field(OFF_PUMP_STATUS, 0),
-            "light": self.block[OFF_LIGHT],
-            "pump_timer_min": self.block[OFF_PUMP_TIMER],
-            "light_timer_min": self.block[OFF_LIGHT_TIMER],
-            "pump_timeout_cfg": self.block[OFF_PUMP_TIMEOUT_CFG],
-            "light_timeout_cfg": self.block[OFF_LIGHT_TIMEOUT_CFG],
-            "raw_pump_status": self.block[OFF_PUMP_STATUS],
-            "raw_pump_demand": self.block[OFF_PUMP_DEMAND],
+            "aux": self._field(OFF_PUMP_STATUS, 0) if have_pumps else None,
+            "light": self._byte(OFF_LIGHT),
+            "pump_timer_min": self._byte(OFF_PUMP_TIMER),
+            "light_timer_min": self._byte(OFF_LIGHT_TIMER),
+            "pump_timeout_cfg": self._byte(OFF_PUMP_TIMEOUT_CFG),
+            "light_timeout_cfg": self._byte(OFF_LIGHT_TIMEOUT_CFG),
+            "raw_pump_status": self._byte(OFF_PUMP_STATUS),
+            "raw_pump_demand": self._byte(OFF_PUMP_DEMAND),
         }

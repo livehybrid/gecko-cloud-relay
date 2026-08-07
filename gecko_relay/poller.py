@@ -94,6 +94,10 @@ class StatusPoller:
         self.seq = 0x20
         self.running = True
         self.connected = False
+        # A module may push change notifications while still declining to dump
+        # the whole block. That is a working session, so treat it as usable
+        # rather than waiting forever for a baseline that is not coming.
+        self.live = False
         self.discovered = bool(spa_id)
         self.last_full_refresh = 0.0
         self.last_ping = 0.0
@@ -156,6 +160,7 @@ class StatusPoller:
 
     def _reset(self) -> None:
         self.connected = False
+        self.live = False
         self._announced = False
         self._target = None
         self._candidates = []
@@ -255,8 +260,8 @@ class StatusPoller:
             return "spa is not online"
         if not self._target or not self.discovered:
             return "still working out where the spa is"
-        if not self.connected:
-            return "no status block yet, so the spa has not accepted us as a client"
+        if not (self.connected or self.live):
+            return "the spa has not accepted us as a client yet"
         return None
 
     def press(self, button: str) -> None:
@@ -321,6 +326,7 @@ class StatusPoller:
                     self._handshake_backoff = HANDSHAKE_RETRY
                     LOG.info("poller has a complete status block")
             elif msg.verb == "STATP":
+                self.live = True
                 changed = self.status.apply_statp(body)
                 self.last_update = time.time()
                 if changed:
@@ -352,6 +358,8 @@ class StatusPoller:
         d.update({
             "enabled": self.enabled,
             "connected": self.connected,
+            "live": self.live,
+            "controllable": self.ready() is None,
             "discovered": self.discovered,
             "client_id": self.client_id,
             "spa_id": self.spa_id,

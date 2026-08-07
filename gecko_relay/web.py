@@ -354,7 +354,9 @@ PAGE = r"""<!doctype html>
     lastState = d;
     // Controls need a client the spa has accepted, which means a complete
     // status block. Anything less and a press would just be dropped.
-    canControl = !!(s && s.enabled && s.connected && r.spa_online);
+    // The server decides: a module can push live changes while refusing to
+    // dump the whole block, and that is still a session we can drive.
+    canControl = !!(s && s.controllable);
     document.getElementById('tup').disabled = !canControl;
     document.getElementById('tdown').disabled = !canControl;
     setLed(!r.spa_id ? 'off' : (r.spa_online ? 'blue' : 'amber'));
@@ -377,24 +379,35 @@ PAGE = r"""<!doctype html>
 
     var acc = document.getElementById('acc');
     if (s && s.known) {
-      document.getElementById('water').textContent = s.water_c.toFixed(1);
-      document.getElementById('waterf').textContent = s.water_f.toFixed(1);
-      document.getElementById('setpoint').textContent = s.setpoint_c.toFixed(1);
-      document.getElementById('heater').textContent = s.heater_c.toFixed(1);
-      var pct = Math.max(0, Math.min(100, ((s.water_c - 10) / 30) * 100));
+      // A field we have not been told is shown as unknown, never as zero.
+      var dash = '\u2014';
+      function t(v) { return v === null || v === undefined ? dash : v.toFixed(1); }
+      function n(v) { return v === null || v === undefined ? dash : v; }
+      function state(v) {
+        return v === null || v === undefined ? dash
+             : (v === 0 ? 'OFF' : (v === 1 ? 'LOW' : 'HIGH'));
+      }
+      document.getElementById('water').textContent = t(s.water_c);
+      document.getElementById('waterf').textContent = t(s.water_f);
+      document.getElementById('setpoint').textContent = t(s.setpoint_c);
+      document.getElementById('heater').textContent = t(s.heater_c);
+      var pct = s.water_c === null || s.water_c === undefined ? 0
+              : Math.max(0, Math.min(100, ((s.water_c - 10) / 30) * 100));
       document.getElementById('tempbar').style.width = pct + '%';
       acc.innerHTML =
         s.pumps.map(function (p) {
-          return devCell('Pump ' + p.n, p.state > 0,
-                         p.state === 0 ? 'OFF' : (p.state === 1 ? 'LOW' : 'HIGH'),
-                         'pump' + p.n);
+          return devCell('Pump ' + p.n, p.state > 0, state(p.state), 'pump' + p.n);
         }).join('') +
-        devCell('Aux / O3', s.aux > 0, s.aux > 0 ? 'ON' : 'OFF', 'aux') +
-        devCell('Lights', s.light > 0, s.light > 0 ? 'ON' : 'OFF', 'light');
+        devCell('Aux / O3', s.aux > 0,
+                s.aux === null || s.aux === undefined ? dash : (s.aux > 0 ? 'ON' : 'OFF'),
+                'aux') +
+        devCell('Lights', s.light > 0,
+                s.light === null || s.light === undefined ? dash : (s.light > 0 ? 'ON' : 'OFF'),
+                'light');
       document.getElementById('ptimer').textContent =
-        s.pump_timer_min + ' / ' + s.pump_timeout_cfg + ' min';
+        n(s.pump_timer_min) + ' / ' + n(s.pump_timeout_cfg) + ' min';
       document.getElementById('ltimer').textContent =
-        s.light_timer_min + ' / ' + s.light_timeout_cfg + ' min';
+        n(s.light_timer_min) + ' / ' + n(s.light_timeout_cfg) + ' min';
     } else {
       acc.innerHTML = '<div class="empty">' +
         (s && s.enabled === false ? 'Status poller is switched off.'

@@ -230,8 +230,15 @@ someone leaning over and pressing it. The spa answers with a change
 notification, so the dashboard catches up on its own within about a second
 rather than guessing at the result.
 
-Controls are greyed out until the poller has a complete status block, because
-until the spa has accepted us as a client a press would just be dropped.
+Controls are greyed out until the spa has accepted us as a client, because
+until then a press is simply dropped. That does not require a complete status
+block: a module that pushes change notifications while declining to dump the
+block is a working session, and `/api/state` reports `controllable` so the page
+does not have to guess.
+
+Any field the module has not actually told us reads as an em dash rather than
+as a zero. A set point that has never been delivered showing as 0.0 °C looks
+like a fault, which is worse than admitting ignorance.
 
 Anyone who can reach the dashboard can turn your pumps on. That is the same
 exposure as the phone app on the same LAN, but the dashboard has no
@@ -280,7 +287,7 @@ to a mock client and exercises the whole path:
 
 ```bash
 python3 tests/mock_spa.py --selftest    # 9 checks, the fixture itself
-python3 tests/test_relay.py             # 63 checks, no network access needed
+python3 tests/test_relay.py             # 71 checks, no network access needed
 ```
 
 The mock reproduces the module's awkward habits, not the convenient ones: it

@@ -350,8 +350,38 @@ def scenario_end_to_end():
     httpd.shutdown()
 
 
+def scenario_partial_knowledge():
+    """A module that pushes changes but will not dump the block.
+
+    Real firmware does exactly this, and reporting an undelivered set point as
+    0.0 reads as a fault rather than as ignorance.
+    """
+    print()
+    print("partial knowledge")
+    st = P.SpaStatus()
+    d = st.as_dict()
+    check("nothing known reads as not known", d == {"known": False}, d)
+
+    # One change notification: two bytes at the water temperature, nothing else.
+    raw = P.c_to_raw(34.0)
+    st.apply_statp(bytes([1]) + P.OFF_WATER_TEMP.to_bytes(2, "big")
+                   + raw.to_bytes(2, "big"))
+    d = st.as_dict()
+    check("the field we were told is reported", abs(d["water_c"] - 34.0) < 0.05,
+          d["water_c"])
+    check("a field we were never told is null, not zero", d["setpoint_c"] is None,
+          d["setpoint_c"])
+    check("pump state unknown rather than off", d["pumps"][0]["state"] is None,
+          d["pumps"][0])
+    check("light unknown rather than off", d["light"] is None, d["light"])
+    check("block still reports itself incomplete", d["complete"] is False)
+    check("has() tracks byte ranges", st.has(P.OFF_WATER_TEMP, 2)
+          and not st.has(P.OFF_SETPOINT, 2))
+
+
 def main():
     scenario_identity()
+    scenario_partial_knowledge()
     scenario_end_to_end()
     print()
     if FAILURES:
