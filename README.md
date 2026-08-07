@@ -70,6 +70,13 @@ Or with Docker:
 docker compose up -d
 ```
 
+**Do not run this on a host that already speaks in.touch2.** Only one process
+on a machine can hold UDP 10022, and the module answers to that port whatever
+port asked, so whoever owns the socket receives *everybody's* replies. Put this
+on the same box as Home Assistant's Gecko integration, or anything else built
+on geckolib, and it will silently swallow their traffic: the integration goes
+`unavailable` and nothing anywhere says why. Give the relay its own host.
+
 **Use host networking, and mean it.** The relay tracks every peer by source
 address and has to send to a client long after that client last spoke, so
 anything that rewrites the source breaks it in both directions.

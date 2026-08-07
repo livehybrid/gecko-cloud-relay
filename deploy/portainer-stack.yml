@@ -19,6 +19,12 @@
 # The service is pinned to one node because the DNS override for
 # intouch.geckoal.com / intouch2.geckoal.com has to resolve to a fixed address.
 # Move both together or the module will talk to a node with nothing listening.
+#
+# It must NOT be the node running Home Assistant, or anything else that speaks
+# in.touch2. Only one process on a host can hold UDP 10022, and the module
+# answers to that port whatever port asked, so whoever owns the socket receives
+# everybody's replies. Co-located with Home Assistant, this relay silently ate
+# geckolib's traffic and the integration simply stopped working.
 
 services:
   gecko-relay:
@@ -46,7 +52,8 @@ services:
       replicas: 1
       placement:
         constraints:
-          - node.labels.name==hpelite
+          # NOT hpelite: Home Assistant is there and needs UDP 10022 itself.
+          - node.labels.name==n1001
       restart_policy:
         condition: any
         delay: 10s
