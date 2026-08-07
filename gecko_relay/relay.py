@@ -35,7 +35,7 @@ ANSWERS_TO_REQUEST = {
     "AVERS": {"SVERS"},
     "SFILE": {"FILES"},
     "STATU": {"STATV"},
-    "APING": {"PACKS"},
+    "APING": {"APING", "PACKS"},   # answered as APING\x00, not PACKS
     "STATQ": {"STATP"},
     "CURCH": {"CHCUR"},
     "SETCH": {"CHSET"},
@@ -107,7 +107,8 @@ class EventLog:
 
 class GeckoCloudRelay:
     def __init__(self, host: str = "0.0.0.0", port: int = P.PORT,
-                 log_size: int = 500, spa_id: Optional[str] = None):
+                 log_size: int = 500, spa_id: Optional[str] = None,
+                 answer_discovery: bool = False):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -117,6 +118,7 @@ class GeckoCloudRelay:
         self.by_addr: dict[tuple[str, int], str] = {}
         self.bindings: dict[str, str] = {}       # client id -> spa id
         self.expected_spa_id = spa_id            # optional pin, from --spa-id
+        self.answer_discovery = answer_discovery  # see on_hello; off for a reason
         self.pending_binding: dict[tuple, str] = {}   # addr -> spa id from ISTHR
         self.local_client = None                 # in-process client, i.e. the poller
         self.unroutable: dict[str, int] = {}      # dst id -> how many we have dropped
@@ -361,8 +363,24 @@ class GeckoCloudRelay:
                     self.bindings[ident] = spa_id
 
     def on_hello(self, msg: P.Message, addr) -> None:
-        """LAN discovery. Not normally seen by the cloud, answered for convenience."""
+        """LAN discovery.
+
+        Off by default, and that is the important part. This is a broadcast, so
+        an app on the same network as the spa gets an answer from the module
+        itself. Answering as well means two devices claim to be the same spa at
+        two addresses: the app opens a session down each, the module interleaves
+        one status block across both, and neither completes. The symptom is an
+        app that sits and spins while the wire log shows a scattered handful of
+        chunks starting somewhere in the middle.
+
+        The real in.touch 2 server never sees a LAN broadcast and so never
+        answers one. Neither should this, unless asked.
+        """
         if msg.value == b"1":
+            if not self.answer_discovery:
+                LOG.debug("ignoring LAN discovery from %s:%s; the spa answers "
+                          "these itself", *addr)
+                return
             ep = self.spa()
             if ep:
                 self.send(addr, P.build_tag("HELLO", f"{ep.ident}|Spa"),

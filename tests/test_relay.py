@@ -104,12 +104,26 @@ def scenario_identity():
     check("client bound to the spa", relay.bindings.get(cid) == mock_spa.SPA_ID,
           relay.bindings)
 
+    # Off by default; turn it on to check it still works when asked for.
+    relay.answer_discovery = True
     cli.sendto(P.build_tag("HELLO", "1"), dest)
     m = P.parse(cli.recvfrom(4096)[0])
-    check("relay answers LAN discovery with the spa id",
+    check("relay answers LAN discovery when asked to",
           m is not None and m.kind == "HELLO"
           and m.value.decode("latin1").startswith(mock_spa.SPA_ID),
           m.value if m else None)
+
+    # And by default it stays out of the way, because the spa answers these
+    # itself and two answers to one broadcast is what breaks a LAN app.
+    relay.answer_discovery = False
+    cli.settimeout(1.5)
+    cli.sendto(P.build_tag("HELLO", "1"), dest)
+    try:
+        got = cli.recvfrom(4096)[0]
+    except socket.timeout:
+        got = None
+    check("relay ignores LAN discovery by default", got is None, got)
+    cli.settimeout(4.0)
 
     relay.close()
     spa.running = False

@@ -54,6 +54,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Pin the spa id, e.g. SPA80:1f:12:50:a5:d1")
     p.add_argument("--client-id", default=_env("CLIENT_ID"),
                    help="Client id used by the status poller (default: random)")
+    p.add_argument("--answer-discovery", action="store_true",
+                   default=_env_flag("ANSWER_DISCOVERY"),
+                   help="Answer LAN <HELLO>1</HELLO> broadcasts. Off by default: "
+                        "the spa answers these itself and two answers break the app")
     p.add_argument("--log-size", type=int, default=int(_env("LOG_SIZE", 500)),
                    help="Wire log ring buffer size (default: %(default)s)")
     p.add_argument("-v", "--verbose", action="store_true", default=_env_flag("VERBOSE"),
@@ -76,7 +80,8 @@ def main(argv=None) -> int:
 
     try:
         relay = GeckoCloudRelay(host=args.host, port=args.port,
-                                log_size=args.log_size, spa_id=args.spa_id)
+                                log_size=args.log_size, spa_id=args.spa_id,
+                                answer_discovery=args.answer_discovery)
     except OSError as exc:
         LOG.error("cannot bind %s:%s (%s)", args.host, args.port, exc)
         if args.port < 1024:

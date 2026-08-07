@@ -93,6 +93,7 @@ from a stack file than a command line.
 | `--no-web` | `GECKO_NO_WEB` | off | Skip the dashboard |
 | `--no-poll` | `GECKO_NO_POLL` | off | Do not join as a client. Use if you suspect the poller is interfering. |
 | `--spa-id` | `GECKO_SPA_ID` | discovered | Pin the spa id so the module is identified on its first ping |
+| `--answer-discovery` | `GECKO_ANSWER_DISCOVERY` | off | Answer LAN `<HELLO>1</HELLO>` broadcasts. Leave it off: see below. |
 | `--client-id` | `GECKO_CLIENT_ID` | derived from the spa id | Client id used by the status poller. The default is stable across restarts on purpose: a module remembers its clients indefinitely. |
 | `--log-size` | `GECKO_LOG_SIZE` | 500 | Wire log ring buffer |
 | `-v` | `GECKO_VERBOSE` | off | Log every datagram, including keepalives |
@@ -165,11 +166,24 @@ Note the MASQUERADE line defeats source-address identification, so pass
 | `<PINGS>1</PINGS>` | module → relay | Answered with `<PINGS>0</PINGS>`. This is what keeps the LED blue. |
 | `<ISTHR>{spa}</ISTHR>` | client → relay | Answered with `<BONJR>0</BONJR>`, and binds that client to that spa. |
 | `<BONJR>{client}</BONJR>` | client → relay | Registers the client. |
-| `<HELLO>1</HELLO>` | client → relay | Answered with the known spa id. Normally a LAN broadcast, handled for convenience. |
+| `<HELLO>1</HELLO>` | client → relay | **Ignored by default.** See below. |
 | `<PACKT>` | either | Forwarded byte-for-byte to the endpoint named in `DESCN`, or to the bound spa when `DESCN` is absent. |
 
 The wire protocol, including the status block offsets, is written up in
 [`docs/intouch2-protocol.md`](docs/intouch2-protocol.md).
+
+### Why LAN discovery is ignored
+
+`<HELLO>1</HELLO>` is a broadcast, so an app on the same network as the spa gets
+an answer from the module itself. Answering as well means two devices claim to
+be the same spa at two different addresses. The app then opens a session down
+each path, the module interleaves a single status block across both, and neither
+one ever completes: the app sits spinning while the wire log shows a scattered
+handful of chunks starting somewhere in the middle.
+
+The real in.touch 2 server never sees a LAN broadcast and so never answers one.
+Neither does this, unless you pass `--answer-discovery`, which exists for
+testing and for a network where the spa cannot answer for itself.
 
 ### Identifying the module
 
@@ -302,7 +316,7 @@ to a mock client and exercises the whole path:
 
 ```bash
 python3 tests/mock_spa.py --selftest    # 9 checks, the fixture itself
-python3 tests/test_relay.py             # 84 checks, no network access needed
+python3 tests/test_relay.py             # 85 checks, no network access needed
 ```
 
 The mock reproduces the module's awkward habits, not the convenient ones: it
