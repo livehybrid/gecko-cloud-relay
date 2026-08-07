@@ -12,6 +12,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+from . import poller as poller_mod
+
 LOG = logging.getLogger("gecko.web")
 
 PAGE = r"""<!doctype html>
@@ -102,13 +104,33 @@ PAGE = r"""<!doctype html>
   /* ---- accessories ---- */
   .acc { display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); gap: 9px; }
   .dev { background: var(--panel-2); border: 1px solid var(--line);
-         border-radius: 7px; padding: 10px 11px; }
+         border-radius: 7px; padding: 10px 11px; text-align: left;
+         font: inherit; color: inherit; width: 100%; }
   .dev .n { font-size: 10px; letter-spacing: .09em; text-transform: uppercase;
             color: var(--dim); }
   .dev .v { font-family: var(--mono); font-size: 15px; margin-top: 3px; }
   .dev.on { border-color: var(--led-green); }
   .dev.on .v { color: var(--led-green); }
   .dev.off .v { color: #4a6373; }
+  button.dev { cursor: pointer; transition: border-color .15s, background .15s; }
+  button.dev:hover:not(:disabled) { background: #18262f; border-color: var(--dim); }
+  button.dev:active:not(:disabled) { transform: translateY(1px); }
+  button.dev:disabled { cursor: not-allowed; opacity: .5; }
+  .dev.busy { border-color: var(--led-amber); }
+
+  /* ---- set point stepper ---- */
+  .step { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  .step button {
+    width: 34px; height: 34px; flex: none; border-radius: 7px; cursor: pointer;
+    background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+    font-size: 19px; line-height: 1; font-family: var(--mono);
+  }
+  .step button:hover:not(:disabled) { border-color: var(--water); color: var(--water); }
+  .step button:disabled { opacity: .4; cursor: not-allowed; }
+  .step .lbl { font-size: 12px; color: var(--dim); }
+  .msg { margin-top: 10px; font-size: 12px; min-height: 16px; color: var(--dim); }
+  .msg.bad { color: var(--led-red); }
+  .msg.good { color: var(--led-green); }
 
   /* ---- wire log ---- */
   .logpanel { margin-top: 14px; }
@@ -174,6 +196,12 @@ PAGE = r"""<!doctype html>
         <div><span>&deg;F</span> <b id="waterf">--.-</b></div>
       </div>
       <div class="bar"><div id="tempbar" style="width:0%"></div></div>
+      <div class="step">
+        <button id="tdown" type="button" disabled aria-label="Lower the set point by 0.5 degrees">&minus;</button>
+        <button id="tup" type="button" disabled aria-label="Raise the set point by 0.5 degrees">+</button>
+        <span class="lbl">Set point, 0.5 &deg;C steps</span>
+      </div>
+      <div class="msg" id="tmsg" role="status" aria-live="polite"></div>
     </section>
 
     <section class="panel">
@@ -183,6 +211,7 @@ PAGE = r"""<!doctype html>
         <div><span>Pump timer</span> <b id="ptimer">&mdash;</b></div>
         <div><span>Light timer</span> <b id="ltimer">&mdash;</b></div>
       </div>
+      <div class="msg" id="amsg" role="status" aria-live="polite"></div>
     </section>
   </div>
 
@@ -267,14 +296,67 @@ PAGE = r"""<!doctype html>
     document.getElementById('statehint').textContent = s.h;
   }
 
-  function devCell(name, on, label) {
-    return '<div class="dev ' + (on ? 'on' : 'off') + '">' +
-           '<div class="n">' + name + '</div>' +
-           '<div class="v">' + label + '</div></div>';
+  function devCell(name, on, label, button) {
+    var cls = 'dev ' + (on ? 'on' : 'off') + (busy[button] ? ' busy' : '');
+    var inner = '<div class="n">' + name + '</div>' +
+                '<div class="v">' + (busy[button] ? '...' : label) + '</div>';
+    if (!button) { return '<div class="' + cls + '">' + inner + '</div>'; }
+    return '<button type="button" class="' + cls + '" data-button="' + button + '"' +
+           (canControl ? '' : ' disabled') + '>' + inner + '</button>';
   }
+
+  // ---- control ----
+  var canControl = false, busy = {}, lastState = null;
+
+  function say(el, text, kind) {
+    var m = document.getElementById(el);
+    m.textContent = text;
+    m.className = 'msg' + (kind ? ' ' + kind : '');
+  }
+
+  function post(body, msgEl, describe) {
+    return fetch('api/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      return r.json().then(function (d) { return { ok: r.ok, d: d }; });
+    }).then(function (res) {
+      if (res.ok && res.d.ok) { say(msgEl, describe + ' sent', 'good'); }
+      else { say(msgEl, res.d.error || 'command failed', 'bad'); }
+    }).catch(function () {
+      say(msgEl, 'could not reach the relay', 'bad');
+    });
+  }
+
+  document.getElementById('acc').addEventListener('click', function (ev) {
+    var btn = ev.target.closest('button[data-button]');
+    if (!btn || !canControl) { return; }
+    var name = btn.dataset.button;
+    // The spa reports the new state via STATP, normally well inside a second.
+    // Hold the tile until then rather than guessing at the result locally.
+    busy[name] = true;
+    if (lastState) { paint(lastState); }
+    setTimeout(function () { busy[name] = false; }, 1500);
+    post({ action: 'press', button: name }, 'amsg', name);
+  });
+
+  function nudge(delta) {
+    if (!canControl) { return; }
+    post({ action: 'setpoint', delta_c: delta }, 'tmsg',
+         'set point ' + (delta > 0 ? '+' : '') + delta + ' °C');
+  }
+  document.getElementById('tup').onclick = function () { nudge(0.5); };
+  document.getElementById('tdown').onclick = function () { nudge(-0.5); };
 
   function paint(d) {
     var r = d.relay, s = d.spa;
+    lastState = d;
+    // Controls need a client the spa has accepted, which means a complete
+    // status block. Anything less and a press would just be dropped.
+    canControl = !!(s && s.enabled && s.connected && r.spa_online);
+    document.getElementById('tup').disabled = !canControl;
+    document.getElementById('tdown').disabled = !canControl;
     setLed(!r.spa_id ? 'off' : (r.spa_online ? 'blue' : 'amber'));
     document.getElementById('spaid').textContent = r.spa_id || '\u2014';
     document.getElementById('spaaddr').textContent = r.spa_addr || '\u2014';
@@ -304,10 +386,11 @@ PAGE = r"""<!doctype html>
       acc.innerHTML =
         s.pumps.map(function (p) {
           return devCell('Pump ' + p.n, p.state > 0,
-                         p.state === 0 ? 'OFF' : (p.state === 1 ? 'LOW' : 'HIGH'));
+                         p.state === 0 ? 'OFF' : (p.state === 1 ? 'LOW' : 'HIGH'),
+                         'pump' + p.n);
         }).join('') +
-        devCell('Aux / O3', s.aux > 0, s.aux > 0 ? 'ON' : 'OFF') +
-        devCell('Lights', s.light > 0, s.light > 0 ? 'ON' : 'OFF');
+        devCell('Aux / O3', s.aux > 0, s.aux > 0 ? 'ON' : 'OFF', 'aux') +
+        devCell('Lights', s.light > 0, s.light > 0 ? 'ON' : 'OFF', 'light');
       document.getElementById('ptimer').textContent =
         s.pump_timer_min + ' / ' + s.pump_timeout_cfg + ' min';
       document.getElementById('ltimer').textContent =
@@ -384,6 +467,52 @@ class _Handler(BaseHTTPRequestHandler):
                 "complete": blk.complete if blk else False,
             }), "application/json")
         return self._send(404, "not found\n", "text/plain")
+
+    def do_POST(self):
+        """Drive the spa. The only endpoint here that writes anything."""
+        u = urlparse(self.path)
+        if u.path != "/api/command":
+            return self._send(404, "not found\n", "text/plain")
+
+        def fail(code, msg):
+            return self._send(code, json.dumps({"ok": False, "error": msg}),
+                              "application/json")
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, OSError):
+            return fail(400, "body must be JSON")
+
+        if self.poller is None:
+            return fail(503, "no status poller, so there is no client to send as")
+        why = self.poller.ready()
+        if why:
+            return fail(503, why)
+
+        action = body.get("action")
+        try:
+            if action == "press":
+                button = body.get("button")
+                if button not in poller_mod.BUTTONS:
+                    return fail(400, f"unknown button {button!r}")
+                self.poller.press(button)
+                return self._send(200, json.dumps({"ok": True, "pressed": button}),
+                                  "application/json")
+            if action == "setpoint":
+                if "celsius" in body:
+                    sent = self.poller.set_setpoint(float(body["celsius"]))
+                elif "delta_c" in body:
+                    sent = self.poller.nudge_setpoint(float(body["delta_c"]))
+                else:
+                    return fail(400, "setpoint needs celsius or delta_c")
+                return self._send(200, json.dumps({"ok": True, "setpoint_c": sent}),
+                                  "application/json")
+        except (TypeError, ValueError) as exc:
+            return fail(400, str(exc))
+        except OSError as exc:
+            return fail(502, f"could not reach the spa: {exc}")
+        return fail(400, f"unknown action {action!r}")
 
 
 def start_web(relay, poller, host: str = "0.0.0.0", port: int = 8080):

@@ -24,6 +24,12 @@ LOG = logging.getLogger("gecko.relay")
 
 PING_STALE_AFTER = 90.0      # EN pings every ~21 s; 4 misses and we call it gone
 
+# Traffic for a client that is not here is expected and unfixable, and a module
+# that is retrying can send it several times a second. Keep a little of it in
+# the wire log for diagnosis and drop the rest on the floor.
+UNROUTABLE_LOG_FIRST = 3
+UNROUTABLE_LOG_EVERY = 250
+
 
 @dataclass
 class Endpoint:
@@ -102,7 +108,7 @@ class GeckoCloudRelay:
         self.expected_spa_id = spa_id            # optional pin, from --spa-id
         self.pending_binding: dict[tuple, str] = {}   # addr -> spa id from ISTHR
         self.local_client = None                 # in-process client, i.e. the poller
-        self._unroutable_seen: set = set()        # dst ids already complained about
+        self.unroutable: dict[str, int] = {}      # dst id -> how many we have dropped
         self.events = EventLog(log_size)
         self.started = time.time()
         self.packets_in = 0
@@ -316,16 +322,25 @@ class GeckoCloudRelay:
         target = self.resolve_target(msg)
         if target is None:
             self.packets_dropped += 1
-            # A module that still holds a session from Gecko's real cloud keeps
-            # pinging that client through us. Say so once, then stop shouting.
-            if msg.dst and msg.dst not in self._unroutable_seen:
-                self._unroutable_seen.add(msg.dst)
+            if not msg.dst:
+                LOG.warning("cannot route %s from %s (no dst)", msg.verb, msg.src)
+                self.events.add("sys", f"{addr[0]}:{addr[1]}", msg, payload,
+                                note="dropped, no route")
+                return
+            # A module holds its client sessions indefinitely, so one that was
+            # paired through Gecko's real cloud keeps pinging that client
+            # through us, and retries hard when nothing answers. There is
+            # nothing to deliver it to and nothing to be done until that client
+            # connects. Count it, say so once, and keep it out of the wire log,
+            # which it would otherwise fill entirely.
+            n = self.unroutable.get(msg.dst, 0) + 1
+            self.unroutable[msg.dst] = n
+            if n == 1:
                 LOG.info("traffic for unknown client %s, dropping until it connects",
                          msg.dst)
-            elif not msg.dst:
-                LOG.warning("cannot route %s from %s (no dst)", msg.verb, msg.src)
-            self.events.add("sys", f"{addr[0]}:{addr[1]}", msg, payload,
-                            note="dropped, no route")
+            if n <= UNROUTABLE_LOG_FIRST or n % UNROUTABLE_LOG_EVERY == 0:
+                self.events.add("sys", f"{addr[0]}:{addr[1]}", msg, payload,
+                                note=f"dropped, no route (x{n})")
             return
         if msg.verb not in ("APING", "PACKS"):
             LOG.info("relay %-5s %s -> %s : %s", msg.verb,
@@ -361,6 +376,7 @@ class GeckoCloudRelay:
             "packets_in": self.packets_in,
             "packets_out": self.packets_out,
             "packets_dropped": self.packets_dropped,
+            "unroutable": dict(self.unroutable),
             "endpoints": [e.as_dict() for e in self.endpoints.values()],
             "bindings": dict(self.bindings),
         }

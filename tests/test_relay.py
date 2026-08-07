@@ -20,6 +20,7 @@ import socket
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -262,6 +263,60 @@ def scenario_end_to_end():
     blk = json.loads(urllib.request.urlopen(base + "/api/block", timeout=5).read())
     check("api/block returns a full 637-byte block",
           blk["complete"] and len(blk["hex"]) == P.BLOCK_LEN * 2, len(blk["hex"] or ""))
+
+    # --- driving the spa from the dashboard ------------------------------
+    print("control from the dashboard")
+
+    def command(payload):
+        req = urllib.request.Request(base + "/api/command", method="POST",
+                                     data=json.dumps(payload).encode(),
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
+    code, out = command({"action": "press", "button": "pump2"})
+    check("api/command accepts a keypress", code == 200 and out.get("ok"), out)
+    ok = wait_for(lambda: spa.state.pump(2) == 2, 6)
+    check("pump 2 turned on at the spa", ok, f"0x{spa.state.block[P.OFF_PUMP_STATUS]:02x}")
+    ok = wait_for(lambda: poller.as_dict()["pumps"][1]["state"] == 2, 8)
+    check("dashboard state caught up via STATP", ok)
+
+    code, out = command({"action": "press", "button": "pump2"})
+    ok = wait_for(lambda: poller.as_dict()["pumps"][1]["state"] == 0, 8)
+    check("pressing again turned pump 2 off", ok)
+
+    code, out = command({"action": "press", "button": "light"})
+    ok = wait_for(lambda: poller.as_dict()["light"] > 0, 8)
+    check("lights switched on from the dashboard", ok, poller.as_dict()["light"])
+    command({"action": "press", "button": "light"})
+    wait_for(lambda: poller.as_dict()["light"] == 0, 8)
+
+    code, out = command({"action": "setpoint", "celsius": 37.5})
+    check("api/command accepts an absolute set point",
+          code == 200 and abs(out.get("setpoint_c", 0) - 37.5) < 0.01, out)
+    ok = wait_for(lambda: abs(poller.as_dict()["setpoint_c"] - 37.5) < 0.05, 8)
+    check("set point reached the spa", ok, poller.as_dict()["setpoint_c"])
+
+    code, out = command({"action": "setpoint", "delta_c": -0.5})
+    ok = wait_for(lambda: abs(poller.as_dict()["setpoint_c"] - 37.0) < 0.05, 8)
+    check("relative set point nudge applied", ok, poller.as_dict()["setpoint_c"])
+
+    code, out = command({"action": "setpoint", "celsius": 90})
+    check("absurd set point clamped rather than written",
+          code == 200 and out["setpoint_c"] == 40.0, out)
+    wait_for(lambda: abs(poller.as_dict()["setpoint_c"] - 40.0) < 0.05, 8)
+
+    code, out = command({"action": "press", "button": "self-destruct"})
+    check("unknown button refused", code == 400 and not out.get("ok"), out)
+    code, out = command({"action": "wat"})
+    check("unknown action refused", code == 400 and not out.get("ok"), out)
+    code, out = command({"action": "setpoint"})
+    check("set point with no value refused", code == 400, out)
+    check("commands refused outright when the poller is off",
+          "disabled" in (StatusPoller(relay, enabled=False).ready() or ""))
 
     print("routing safety")
     dropped_before = relay.packets_dropped

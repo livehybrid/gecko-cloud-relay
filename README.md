@@ -79,7 +79,7 @@ from a stack file than a command line.
 | `--no-web` | `GECKO_NO_WEB` | off | Skip the dashboard |
 | `--no-poll` | `GECKO_NO_POLL` | off | Do not join as a client. Use if you suspect the poller is interfering. |
 | `--spa-id` | `GECKO_SPA_ID` | discovered | Pin the spa id so the module is identified on its first ping |
-| `--client-id` | `GECKO_CLIENT_ID` | random | Client id used by the status poller |
+| `--client-id` | `GECKO_CLIENT_ID` | derived from the spa id | Client id used by the status poller. The default is stable across restarts on purpose: a module remembers its clients indefinitely. |
 | `--log-size` | `GECKO_LOG_SIZE` | 500 | Wire log ring buffer |
 | `-v` | `GECKO_VERBOSE` | off | Log every datagram, including keepalives |
 
@@ -191,17 +191,14 @@ Disable it with `--no-poll` if you suspect it is interfering with Home Assistant
 or the phone app. Multiple concurrent clients are supported by the protocol, so
 it should not, but it is one more variable when debugging.
 
-**Status against real hardware.** The poller reads the module's version and pack
-file list reliably. Assembling the full status block has been seen to work but
-is not yet dependable, and the leading suspect is that the module had not been
-power-cycled since the DNS change: it keeps serving the session it already had,
-including pinging a phone client that Gecko's cloud gave it. Power-cycle the EN
-module after repointing DNS, which you should do anyway, before drawing any
-conclusion about the dashboard. None of this affects the relay itself; the
-keepalives and app relaying do not depend on the poller, and `--no-poll` turns
-it off entirely. `/api/state` reports `via_relay` and `via_socket` so you can
-see which path replies are taking. What the module does and does not answer is
-written up in [`docs/intouch2-protocol.md`](docs/intouch2-protocol.md).
+**Status against real hardware.** Confirmed working on an in.touch2-EN with pack
+`inXM_C06`: version, pack files, the full 637-byte block and live change
+notifications. It can take a few minutes to settle after the module is first
+pointed at the relay, because the module carries on serving the session it
+already had. `/api/state` reports `via_relay` and `via_socket` so you can see
+which path replies are taking; on this hardware it is all relay. What the module
+does and does not answer is written up in
+[`docs/intouch2-protocol.md`](docs/intouch2-protocol.md).
 
 ---
 
@@ -214,7 +211,26 @@ written up in [`docs/intouch2-protocol.md`](docs/intouch2-protocol.md).
 - **Accessories** shows pumps, aux/O3 and lights, with their countdown timers.
 - **Wire log** shows every datagram, decoded. Keypresses read as
   `SPACK keypress Pump 1`, writes as `SPACK write @15 = 0237 (31.5 C)`. Toggle
-  hex to see the raw bytes.
+  hex to see the raw bytes. Traffic for a client that is not connected is
+  counted but mostly kept out of the log, or it would be the only thing in it;
+  the running totals are in `/api/state` under `unroutable`.
+
+### Driving the spa
+
+The accessory tiles are buttons, and the set point has a stepper. A press sends
+the same key code the topside panel sends, so it is indistinguishable from
+someone leaning over and pressing it. The spa answers with a change
+notification, so the dashboard catches up on its own within about a second
+rather than guessing at the result.
+
+Controls are greyed out until the poller has a complete status block, because
+until the spa has accepted us as a client a press would just be dropped.
+
+Anyone who can reach the dashboard can turn your pumps on. That is the same
+exposure as the phone app on the same LAN, but the dashboard has no
+authentication, so put it somewhere you are happy with. `--no-poll` removes the
+ability entirely: with no client there is nothing to send as, and commands are
+refused with 503.
 
 ### API
 
@@ -223,9 +239,28 @@ written up in [`docs/intouch2-protocol.md`](docs/intouch2-protocol.md).
 | `GET /api/state` | Relay status, endpoints and decoded spa state |
 | `GET /api/events?since=N` | Wire log entries after sequence N |
 | `GET /api/block` | The raw 637-byte status block as hex |
+| `POST /api/command` | Press a button or set the temperature |
 
 `/api/block` is the one to grab when something looks wrong. It is the whole
 truth about the spa in one string and can be decoded offline.
+
+```bash
+# buttons: pump1 pump2 pump3 aux light tempup tempdown
+curl -X POST http://<host>:8080/api/command \
+     -H 'Content-Type: application/json' -d '{"action":"press","button":"pump1"}'
+
+# absolute, clamped to 15-40 C
+curl -X POST http://<host>:8080/api/command \
+     -H 'Content-Type: application/json' -d '{"action":"setpoint","celsius":37.5}'
+
+# or relative
+curl -X POST http://<host>:8080/api/command \
+     -H 'Content-Type: application/json' -d '{"action":"setpoint","delta_c":-0.5}'
+```
+
+The set point is clamped to 15-40 °C. That write goes straight into the pack's
+status block, and there is no reason to find out what the pack does with a
+value outside its own range.
 
 ---
 
@@ -238,7 +273,7 @@ to a mock client and exercises the whole path:
 
 ```bash
 python3 tests/mock_spa.py --selftest    # 9 checks, the fixture itself
-python3 tests/test_relay.py             # 50 checks, no network access needed
+python3 tests/test_relay.py             # 63 checks, no network access needed
 ```
 
 The mock reproduces the module's awkward habits, not the convenient ones: it

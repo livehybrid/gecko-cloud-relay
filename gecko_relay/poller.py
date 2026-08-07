@@ -57,6 +57,26 @@ HELLO_RETRY = 2.0
 # original capture showed, with no DESCN. Better a degraded dashboard than none.
 DISCOVERY_GIVE_UP = 30.0
 
+# Buttons, by the name the dashboard uses. These are the same key codes the
+# physical topside panel sends, so a press here is indistinguishable from
+# someone leaning over and pressing it.
+BUTTONS = {
+    "pump1": 0x01,
+    "pump2": 0x02,
+    "pump3": 0x03,
+    "aux": 0x06,
+    "light": 0x10,
+    "tempup": 0x15,
+    "tempdown": 0x16,
+}
+
+# A set point write goes straight into the pack's status block, so refuse
+# anything absurd rather than find out what the pack does with it. A domestic
+# spa lives at the top of this range; the floor is here for freeze protection
+# and winterising, not because anyone bathes at 15 degrees.
+SETPOINT_MIN_C = 15.0
+SETPOINT_MAX_C = 40.0
+
 
 class StatusPoller:
     def __init__(self, relay, client_id: Optional[str] = None,
@@ -233,6 +253,46 @@ class StatusPoller:
                         "talking to the module without DESCN")
         self._target = self._candidates[0]
         self.discovered = True
+
+    # -- control -----------------------------------------------------------
+    #
+    # Writes, unlike everything else here. The spa answers with a STATP, so the
+    # dashboard catches up on its own within a second and there is no need to
+    # guess at the new state locally.
+
+    def ready(self) -> Optional[str]:
+        """Why a command cannot be sent right now, or None if it can."""
+        if not self.enabled:
+            return "status poller is disabled (--no-poll)"
+        if not self.relay.spa_online():
+            return "spa is not online"
+        if not self._target or not self.discovered:
+            return "still working out where the spa is"
+        if not self.connected:
+            return "no status block yet, so the spa has not accepted us as a client"
+        return None
+
+    def press(self, button: str) -> None:
+        """Send a keypress, exactly as the topside panel does."""
+        key = BUTTONS[button]
+        LOG.info("keypress %s (%s) from the dashboard", button,
+                 P.KEYPAD.get(key, hex(key)))
+        self.send(b"SPACK" + bytes([self.next_seq(), 0x06, 0x02, P.CMD_KEYPRESS, key]))
+
+    def set_setpoint(self, celsius: float) -> float:
+        """Write the water set point. Returns the value actually sent."""
+        c = max(SETPOINT_MIN_C, min(SETPOINT_MAX_C, float(celsius)))
+        raw = P.c_to_raw(c)
+        LOG.info("set point -> %.1f C (raw %d) from the dashboard", c, raw)
+        self.send(b"SPACK" + bytes([self.next_seq(), 0x06, 0x07, P.CMD_SETVALUE,
+                                    0x06, 0x06])
+                  + P.OFF_SETPOINT.to_bytes(2, "big") + raw.to_bytes(2, "big"))
+        return c
+
+    def nudge_setpoint(self, delta_c: float) -> float:
+        with self._lock:
+            current = P.raw_to_c(self.status.word(P.OFF_SETPOINT))
+        return self.set_setpoint(current + delta_c)
 
     def request_full_block(self) -> None:
         self.last_full_refresh = time.time()
