@@ -244,13 +244,23 @@ All three are covered by the tests. `--spa-id` skips the guessing entirely.
 
 The relay only forwards bytes, so on its own it cannot tell you what the spa is
 doing. The poller joins as an ordinary client to read status for the dashboard.
-It does what the app does:
+It does what the app does, **one step at a time**:
 
 1. `<HELLO>1</HELLO>` to discover the module's id, unless one was pinned
-2. `<HELLO>{client_id}</HELLO>` to announce itself, because the module ignores
-   clients it has not been introduced to
-3. pull the pack file list, the version and the 637-byte status block
-4. `APING` every 2 seconds
+2. `AVERS` → `SVERS`, the firmware versions
+3. `CURCH` → `CHCUR`, the RF channel and signal strength
+4. `SFILE` → `FILES`, which pack this is
+5. `STATU` → `STATV`, the 637-byte status block in 39-byte chunks
+6. `STATQ` to arm change notifications, then `APING` every 2 seconds, and a
+   full re-read every 60 seconds as a backstop
+
+Each step waits for its own answer before the next goes out, retries four times,
+then restarts the conversation with backoff. This is not fussiness: firing the
+requests off together, or skipping the channel step, gets `STATU` dropped with
+no reply and no error. Sequence numbers matter too, 1-191 for these requests and
+192-255 for `SPACK` commands. Both rules come from geckolib, and both cost a day
+of believing the module had singled us out. `GET /api/state` reports which step
+the handshake has reached, so a stall says where it stopped.
 
 Everything after step 1 names the spa in `DESCN`. If the module never answers
 discovery, the poller waits 30 seconds, warns, and falls back to whatever id

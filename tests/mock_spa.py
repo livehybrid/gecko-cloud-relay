@@ -119,6 +119,9 @@ class GeckoMockServer:
         self.progress: dict[str, set] = {}
         self.refused = 0
         self.lax = lax
+        # Verbs this module simply never answers. The live one never answers
+        # SFILE, so a client that waits for it waits forever.
+        self.mute: set = set()
         self.cloud: tuple[str, int] | None = None
         self.cloud_interval = CLOUD_PING_INTERVAL
         self.cloud_acks = 0
@@ -225,6 +228,9 @@ class GeckoMockServer:
             self.add_client(msg.src, addr)
 
         body, verb, src = msg.body, msg.verb, msg.src
+        if verb in self.mute:
+            LOG.debug("mock spa staying silent on %s, as configured", verb)
+            return
         done = self.progress.setdefault(src, set())
         if verb == "APING":
             self.reply(addr, b"PACKS", src)
@@ -261,7 +267,10 @@ class GeckoMockServer:
         """
         if self.lax:
             return True
-        missing = [v for v in self.HANDSHAKE_BEFORE_BLOCK if v not in done]
+        # A module cannot demand a step it refuses to perform, so anything
+        # muted drops out of the precondition as well.
+        missing = [v for v in self.HANDSHAKE_BEFORE_BLOCK
+                   if v not in done and v not in self.mute]
         if missing:
             self.refused += 1
             LOG.debug("mock spa ignoring STATU from %s, still owed %s",

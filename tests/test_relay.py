@@ -630,6 +630,31 @@ def scenario_handshake_discipline():
     spa.running = False
     relay.close()
 
+    # A module that never answers SFILE, which is what the live one does. The
+    # pack it would name is one we do not need, so waiting for it forever is
+    # the wrong answer: ask, give up, carry on to the block.
+    print()
+    print("a step the module never answers")
+    relay = GeckoCloudRelay(host="127.0.0.1", port=0)
+    relay_port = relay.sock.getsockname()[1]
+    threading.Thread(target=relay.serve_forever, daemon=True).start()
+    spa = start_spa(relay_port)
+    spa.mute.add("SFILE")
+    poller = StatusPoller(relay, client_id="GRLYmute-0001")
+    threading.Thread(target=poller.run, daemon=True).start()
+
+    ok = wait_for(lambda: poller.connected, 40)
+    check("block still obtained when SFILE goes unanswered", ok, poller.step)
+    check("pack files simply stay unknown", poller.pack_files == "",
+          poller.pack_files)
+    check("set point read despite the missing step",
+          abs((poller.as_dict().get("setpoint_c") or 0) - 36.0) < 0.05,
+          poller.as_dict().get("setpoint_c"))
+
+    poller.stop()
+    spa.running = False
+    relay.close()
+
 
 def scenario_partial_knowledge():
     """A module that pushes changes but will not dump the block.

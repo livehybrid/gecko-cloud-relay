@@ -187,11 +187,27 @@ address cloud-dialect clients by name, so the two cases have to be told apart:
 an unaddressed reply belongs to whoever asked over the LAN dialect, and an
 addressed one is routed normally.
 
-**It will not serve the status block to port 10022.** Asking from there gets
-`SVERS` and `FILES` back but `STATU` is ignored entirely, with no error.
-Presumably the module treats that port as the server and declines to regard the
-server as a client. So requests must go out from an ephemeral socket even though
-the answers come back to 10022.
+**The handshake is ordered, and `STATU` is dropped in silence if you get it
+wrong.** This one was written up here twice before it was understood, first as
+"it will not serve the status block to port 10022" and then as "it serves the
+app and ignores the byte-identical request from us". Both were wrong. The
+module was not treating us differently; we were asking incorrectly, in two ways
+that produce no error and no reply:
+
+1. **Order.** It expects `AVERS` -> `CURCH` -> `SFILE` -> `STATU`, each waiting
+   for its answer. Sending them together, or skipping the channel step, loses
+   the block. `SVERS` and `FILES` still come back, which is what makes this look
+   like selective refusal rather than a sequencing problem.
+2. **Sequence space.** Protocol requests are numbered **1-191** and pack
+   commands **192-255**. A `STATU` numbered in the command range is ignored.
+
+Both are visible in geckolib, which polls the same module successfully from
+Home Assistant, and are worth treating as the reference: if this relay and the
+hardware disagree, geckolib is the tie-breaker.
+
+Once the block is in hand, send `STATQ` to arm change notifications and re-arm
+it on every `STATP`. Keep `APING` going every 2 seconds or the notifications
+stop.
 
 **It remembers clients indefinitely.** A module that had a phone paired through
 Gecko's cloud kept sending that client `APING` every 2 seconds, through the

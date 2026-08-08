@@ -77,6 +77,14 @@ SEQ_COMMAND = (192, 255)
 # and the module simply stops when it runs out. Asking for exactly BLOCK_LEN
 # also works, but there is no reason to differ from the client we know works.
 BLOCK_REQUEST_LEN = 1024
+
+# The order the module wants to be asked in.
+NEXT_STEP = {"version": "channel", "channel": "config", "config": "block"}
+# Steps worth asking for but not worth stalling on. The live module answers
+# AVERS and CURCH immediately and has never once answered SFILE, and since the
+# status block offsets here are fixed rather than read out of the pack file,
+# the answer would not change anything we do.
+OPTIONAL_STEPS = {"config"}
 # If the module never answers discovery, stop waiting and talk to it the way the
 # original capture showed, with no DESCN. Better a degraded dashboard than none.
 DISCOVERY_GIVE_UP = 30.0
@@ -279,9 +287,19 @@ class StatusPoller:
             return
 
         if self._step_tries >= STEP_RETRIES:
-            # This step is genuinely not being answered. Start the whole
-            # conversation again rather than pressing on out of order, and back
-            # off so a module that is busy or asleep is not hammered.
+            if self.step in OPTIONAL_STEPS:
+                # Asked for, not answered, not worth stalling over. This module
+                # never answers SFILE for us, and the pack it would name is one
+                # we do not use: the offsets in protocol.py are fixed. Carrying
+                # on is how we find out whether the block actually depended on
+                # it or whether it was only ever part of the etiquette.
+                LOG.info("no answer to %s after %d tries; carrying on without it",
+                         self.step, self._step_tries)
+                self._step_done(self.step, NEXT_STEP[self.step])
+                return
+            # A step that matters is genuinely not being answered. Start the
+            # whole conversation again rather than pressing on out of order, and
+            # back off so a module that is busy or asleep is not hammered.
             LOG.warning("no answer to %s after %d tries; restarting the handshake "
                         "(next attempt in %.0fs)",
                         self.step, self._step_tries, self._handshake_backoff)
@@ -467,14 +485,14 @@ class StatusPoller:
             elif msg.verb == "FILES":
                 self.pack_files = body.decode("latin1", "replace").lstrip(",")
                 LOG.info("spa pack files: %s", self.pack_files)
-                self._step_done("config", "block")
+                self._step_done("config", NEXT_STEP["config"])
             elif msg.verb == "SVERS":
                 self.versions = body.hex()
-                self._step_done("version", "channel")
+                self._step_done("version", NEXT_STEP["version"])
             elif msg.verb == "CHCUR" and len(body) >= 2:
                 self.channel, self.signal = body[0], body[1]
                 LOG.info("spa RF channel %s, signal %s", self.channel, self.signal)
-                self._step_done("channel", "config")
+                self._step_done("channel", NEXT_STEP["channel"])
 
     def on_hello(self, msg: P.Message, addr: tuple[str, int]) -> None:
         """Discovery reply: ``<HELLO>SPAxx:xx:...|Name</HELLO>``."""
