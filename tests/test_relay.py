@@ -600,6 +600,33 @@ def scenario_handshake_discipline():
     check("the two spaces never collide", not set(seqs) & set(cmds))
     relay.close()
 
+    # Identity. The module answers what it knows by itself to anyone, and
+    # serves pack data only to a client whose id looks like the app's. This was
+    # the real cause of a status block that never arrived, and it is invisible:
+    # no refusal, no error, just the pack verbs going unanswered while the
+    # module-local ones come straight back.
+    check("the poller calls itself what the served clients call themselves",
+          StatusPoller(GeckoCloudRelay(host="127.0.0.1", port=0)).client_id
+          .startswith(mock_spa.PACK_CLIENT_PREFIX))
+
+    relay = GeckoCloudRelay(host="127.0.0.1", port=0)
+    relay_port = relay.sock.getsockname()[1]
+    threading.Thread(target=relay.serve_forever, daemon=True).start()
+    spa = start_spa(relay_port)
+    stranger = StatusPoller(relay, client_id="GRLYwrong-prefix")
+    threading.Thread(target=stranger.run, daemon=True).start()
+
+    ok = wait_for(lambda: stranger.channel is not None, 20)
+    check("a client under any name still gets the module's own answers", ok,
+          stranger.channel)
+    check("but never the status block", not wait_for(lambda: stranger.connected, 12),
+          stranger.step)
+    check("and the module says nothing about why", spa.refused > 0,
+          f"refused={spa.refused}")
+    stranger.stop()
+    spa.running = False
+    relay.close()
+
     # Order. Each step waits for its own answer; the block is asked for last.
     relay = GeckoCloudRelay(host="127.0.0.1", port=0)
     relay_port = relay.sock.getsockname()[1]

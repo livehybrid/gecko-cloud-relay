@@ -55,6 +55,13 @@ VERSION = b"\x01\x2c\x00\x03\x00\x02"
 RF_CHANNEL = 17
 RF_SIGNAL = 62
 
+# The module answers anything it knows by itself to any client, but only serves
+# pack data to clients calling themselves "IOS" plus a uuid. Confirmed on
+# hardware: the same poller under a "GRLY" id got AVERS and CURCH instantly and
+# was never once answered on SFILE or STATU; renaming it fixed both in three
+# seconds. See docs/intouch2-protocol.md.
+PACK_CLIENT_PREFIX = "IOS"
+
 # Protocol requests are numbered 1-191, pack commands 192-255.
 SEQ_PROTOCOL_MAX = 191
 
@@ -119,9 +126,13 @@ class GeckoMockServer:
         self.progress: dict[str, set] = {}
         self.refused = 0
         self.lax = lax
-        # Verbs this module simply never answers. The live one never answers
-        # SFILE, so a client that waits for it waits forever.
+        # Verbs this module simply never answers, whoever asks.
         self.mute: set = set()
+        # Verbs that need the spa pack, and so are served only to a client the
+        # module regards as a real one. Everything else it answers from its own
+        # knowledge and will tell anybody.
+        self.pack_verbs = {"SFILE", "STATU"}
+        self.pack_client_prefix = PACK_CLIENT_PREFIX
         self.cloud: tuple[str, int] | None = None
         self.cloud_interval = CLOUD_PING_INTERVAL
         self.cloud_acks = 0
@@ -230,6 +241,14 @@ class GeckoMockServer:
         body, verb, src = msg.body, msg.verb, msg.src
         if verb in self.mute:
             LOG.debug("mock spa staying silent on %s, as configured", verb)
+            return
+        if (not self.lax and verb in self.pack_verbs and src
+                and not src.startswith(self.pack_client_prefix)):
+            # Not a refusal it will tell you about. This is the one that reads
+            # as the module having taken against you personally.
+            self.refused += 1
+            LOG.debug("mock spa ignoring %s from %s: not an %s client",
+                      verb, src, self.pack_client_prefix)
             return
         done = self.progress.setdefault(src, set())
         if verb == "APING":

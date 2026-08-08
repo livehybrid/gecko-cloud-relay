@@ -46,10 +46,13 @@ Identifiers:
 | Kind | Form | Example |
 |---|---|---|
 | Spa | `SPA` + the module's MAC | `SPA80:1f:12:50:a5:d1` |
-| Client | free-form, chosen by the client | `IOS8f2c…`, `GRLY…` |
+| Client | **`IOS` + a uuid**, and it is not free-form | `IOS8f2c1e40-…` |
 
-The `SPA` prefix is load-bearing here: the relay uses it to tell a module apart
-from an app without being told which is which.
+Both prefixes are load-bearing. `SPA` is how the relay tells a module apart from
+an app without being told which is which. `IOS` is how the *module* decides
+whether you are a real client: pick anything else and it will answer questions
+about itself and quietly ignore every request that needs the spa pack. See
+"How a module answers" below, and expect to lose an afternoon if you do not.
 
 ## Verbs
 
@@ -187,23 +190,43 @@ address cloud-dialect clients by name, so the two cases have to be told apart:
 an unaddressed reply belongs to whoever asked over the LAN dialect, and an
 addressed one is routed normally.
 
-**The handshake is ordered, and `STATU` is dropped in silence if you get it
-wrong.** This one was written up here twice before it was understood, first as
-"it will not serve the status block to port 10022" and then as "it serves the
-app and ignores the byte-identical request from us". Both were wrong. The
-module was not treating us differently; we were asking incorrectly, in two ways
-that produce no error and no reply:
+**It only serves pack data to a client that calls itself `IOS…`.** This one was
+written up here wrongly twice, first as "it will not serve the status block to
+port 10022", then as "it serves the app and ignores the byte-identical request
+from us". Both readings had the module singling us out for some property of our
+socket. It was simpler and much stupider than that: our client id started
+`GRLY`.
 
-1. **Order.** It expects `AVERS` -> `CURCH` -> `SFILE` -> `STATU`, each waiting
-   for its answer. Sending them together, or skipping the channel step, loses
-   the block. `SVERS` and `FILES` still come back, which is what makes this look
-   like selective refusal rather than a sequencing problem.
-2. **Sequence space.** Protocol requests are numbered **1-191** and pack
-   commands **192-255**. A `STATU` numbered in the command range is ignored.
+The split is exact, and it is what gives the game away:
 
-Both are visible in geckolib, which polls the same module successfully from
-Home Assistant, and are worth treating as the reference: if this relay and the
-hardware disagree, geckolib is the tie-breaker.
+| Verb | Needs | Answered to `GRLY…`? |
+|---|---|---|
+| `AVERS` | the module's own firmware | yes, instantly |
+| `CURCH` | the module's own RF link | yes, instantly |
+| `SFILE` | the spa pack | **never** |
+| `STATU` | the spa pack | **never** |
+
+Everything the in.touch module knows by itself, it will tell anyone. Anything it
+would have to ask the pack for, it serves only to a client whose id looks like
+the app's. The phone app and geckolib both use `IOS` plus a uuid, and geckolib
+hardcodes that format (`FORMAT_CLIENT_IDENTIFIER = "IOS{0}"`). Renaming the
+poller from `GRLY<uuid>` to `IOS<uuid>` produced a complete status block three
+seconds later, having produced nothing at all in the hours before.
+
+Whether the firmware matches on the prefix or simply expects 39 characters
+cannot be determined from the client end. Either way: use `IOS` plus a uuid.
+
+Two more rules matter, both learned from geckolib on the way to the above and
+both worth keeping:
+
+1. **Order.** Ask `AVERS` -> `CURCH` -> `SFILE` -> `STATU`, each waiting for its
+   own answer rather than all at once.
+2. **Sequence space.** Protocol requests are numbered **1-191**, pack commands
+   **192-255**.
+
+Neither produces an error when broken. In general, if this relay and the
+hardware disagree, geckolib is the tie-breaker: it is the same protocol talking
+to the same module, and it works.
 
 Once the block is in hand, send `STATQ` to arm change notifications and re-arm
 it on every `STATP`. Keep `APING` going every 2 seconds or the notifications

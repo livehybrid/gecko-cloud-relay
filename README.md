@@ -107,7 +107,7 @@ from a stack file than a command line.
 | `--upstream` | `GECKO_UPSTREAM` | off | Also forward to Gecko's own service, so the app keeps working from outside |
 | `--upstream-dns` | `GECKO_UPSTREAM_DNS` | system | Resolver to look `--upstream` up with. Needed, because your own DNS points that name here |
 | `--answer-discovery` | `GECKO_ANSWER_DISCOVERY` | off | Answer LAN `<HELLO>1</HELLO>` broadcasts. Leave it off: see below. |
-| `--client-id` | `GECKO_CLIENT_ID` | derived from the spa id | Client id used by the status poller. The default is stable across restarts on purpose: a module remembers its clients indefinitely. |
+| `--client-id` | `GECKO_CLIENT_ID` | `IOS` + a uuid derived from the spa id | Client id used by the status poller. **Keep the `IOS` prefix**: the module will not serve pack data to anything else, and says nothing when it declines. Stable across restarts on purpose, because a module remembers its clients indefinitely. |
 | `--log-size` | `GECKO_LOG_SIZE` | 500 | Wire log ring buffer |
 | `-v` | `GECKO_VERBOSE` | off | Log every datagram, including keepalives |
 
@@ -255,12 +255,18 @@ It does what the app does, **one step at a time**:
    full re-read every 60 seconds as a backstop
 
 Each step waits for its own answer before the next goes out, retries four times,
-then restarts the conversation with backoff. This is not fussiness: firing the
-requests off together, or skipping the channel step, gets `STATU` dropped with
-no reply and no error. Sequence numbers matter too, 1-191 for these requests and
-192-255 for `SPACK` commands. Both rules come from geckolib, and both cost a day
-of believing the module had singled us out. `GET /api/state` reports which step
-the handshake has reached, so a stall says where it stopped.
+then restarts the conversation with backoff. Sequence numbers are 1-191 for
+these requests and 192-255 for `SPACK` commands. Both rules come from geckolib.
+`GET /api/state` reports which step the handshake has reached, so a stall says
+where it stopped.
+
+**The client id is not free-form.** It must be `IOS` plus a uuid, which is what
+the phone app and geckolib both use. Under any other name the module answers
+`AVERS` and `CURCH` from its own knowledge and ignores `SFILE` and `STATU`
+entirely, because those need the spa pack and it will not ask the pack on behalf
+of a client it does not recognise. There is no error and no refusal, just
+silence on exactly the two verbs you need. This cost the best part of a day, and
+`--client-id` will happily let you do it again, so do not.
 
 Everything after step 1 names the spa in `DESCN`. If the module never answers
 discovery, the poller waits 30 seconds, warns, and falls back to whatever id
@@ -277,10 +283,10 @@ or the phone app. Multiple concurrent clients are supported by the protocol, so
 it should not, but it is one more variable when debugging.
 
 **Status against real hardware.** Confirmed working on an in.touch2-EN with pack
-`inXM_C06`: version, pack files, the full 637-byte block and live change
-notifications. It can take a few minutes to settle after the module is first
-pointed at the relay, because the module carries on serving the session it
-already had. `/api/state` reports `via_relay` and `via_socket` so you can see
+`inXM_C06`: version, RF channel, pack files, the full 637-byte block and live
+change notifications. A cold start completes the whole handshake in about three
+seconds. The dashboard then stays current from change notifications, with a full
+re-read every 60 seconds, and no longer depends on the phone app being open. `/api/state` reports `via_relay` and `via_socket` so you can see
 which path replies are taking; on this hardware it is all relay. What the module
 does and does not answer is written up in
 [`docs/intouch2-protocol.md`](docs/intouch2-protocol.md).
