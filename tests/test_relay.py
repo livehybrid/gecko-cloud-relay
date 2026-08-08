@@ -158,7 +158,7 @@ def scenario_end_to_end():
     threading.Thread(target=relay.serve_forever, daemon=True).start()
     spa = start_spa(relay_port)
 
-    poller = StatusPoller(relay, client_id="GRLYtest-0001")
+    poller = StatusPoller(relay, client_id="IOStest-0001")
     httpd = start_web(relay, poller, "127.0.0.1", 0)
     web_port = httpd.server_address[1]
     threading.Thread(target=poller.run, daemon=True).start()
@@ -412,7 +412,7 @@ def scenario_snooping():
 
     # Attached but never run, so it cannot ask for anything itself. That is the
     # situation on the real module, which serves the app and ignores us.
-    poller = StatusPoller(relay, client_id="GRLYsnoop-0001")
+    poller = StatusPoller(relay, client_id="IOSrelay-snoop")
     relay.attach_local_client(poller)
     wait_for(lambda: relay.spa() is not None, 8)
 
@@ -585,7 +585,7 @@ def scenario_handshake_discipline():
     print("handshake discipline")
 
     relay = GeckoCloudRelay(host="127.0.0.1", port=0)
-    poller = StatusPoller(relay, client_id="GRLYseq-0001")
+    poller = StatusPoller(relay, client_id="IOSseq-0001")
 
     # Sequence numbers live in two spaces. Protocol requests that stray into
     # the pack-command range are dropped by the module without a word.
@@ -605,7 +605,7 @@ def scenario_handshake_discipline():
     relay_port = relay.sock.getsockname()[1]
     threading.Thread(target=relay.serve_forever, daemon=True).start()
     spa = start_spa(relay_port)
-    poller = StatusPoller(relay, client_id="GRLYorder-0001")
+    poller = StatusPoller(relay, client_id="IOSorder-0001")
     threading.Thread(target=poller.run, daemon=True).start()
 
     ok = wait_for(lambda: poller.connected, 25)
@@ -640,7 +640,7 @@ def scenario_handshake_discipline():
     threading.Thread(target=relay.serve_forever, daemon=True).start()
     spa = start_spa(relay_port)
     spa.mute.add("SFILE")
-    poller = StatusPoller(relay, client_id="GRLYmute-0001")
+    poller = StatusPoller(relay, client_id="IOSmute-0001")
     threading.Thread(target=poller.run, daemon=True).start()
 
     ok = wait_for(lambda: poller.connected, 40)

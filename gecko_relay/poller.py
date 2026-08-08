@@ -85,6 +85,16 @@ NEXT_STEP = {"version": "channel", "channel": "config", "config": "block"}
 # status block offsets here are fixed rather than read out of the pack file,
 # the answer would not change anything we do.
 OPTIONAL_STEPS = {"config"}
+
+# Client ids look free-form and are not. Every client this module serves pack
+# data to calls itself "IOS" plus a uuid: the phone app, and geckolib, which
+# hardcodes the same format. Calling ourselves "GRLY" plus a uuid got AVERS and
+# CURCH answered instantly and SFILE and STATU ignored without a word, which is
+# exactly the split between what the EN module knows by itself and what it has
+# to ask the spa pack for. So take the format that is known to work. Whether
+# the firmware is matching the prefix or simply expecting 39 characters is not
+# something this end can tell, and either way the answer is the same.
+CLIENT_PREFIX = "IOS"
 # If the module never answers discovery, stop waiting and talk to it the way the
 # original capture showed, with no DESCN. Better a degraded dashboard than none.
 DISCOVERY_GIVE_UP = 30.0
@@ -119,7 +129,7 @@ class StatusPoller:
         # So do not invent a fresh identity on every restart. Derive a stable
         # one from the spa once it is known, and until then use a placeholder.
         self.pinned_client_id = bool(client_id)
-        self.client_id = client_id or f"GRLY{uuid.uuid4()}"
+        self.client_id = client_id or CLIENT_PREFIX + str(uuid.uuid4())
         self.enabled = enabled
         self.spa_id = spa_id or ""          # DESCN; learned by discovery if unset
         self.pinned_spa_id = bool(spa_id)
@@ -335,12 +345,13 @@ class StatusPoller:
 
         Derived from the spa so that two relays pointed at different spas do not
         collide, and so redeploying does not leave another dead session behind
-        on a module that never forgets one.
+        on a module that never forgets one. The prefix is not ours to choose:
+        see CLIENT_PREFIX.
         """
         if self.pinned_client_id or not self.spa_id:
             return
-        stable = "GRLY" + str(uuid.uuid5(uuid.NAMESPACE_DNS,
-                                         "gecko-cloud-relay|" + self.spa_id))
+        stable = CLIENT_PREFIX + str(uuid.uuid5(uuid.NAMESPACE_DNS,
+                                                "gecko-cloud-relay|" + self.spa_id))
         if stable != self.client_id:
             LOG.info("poller client id %s (stable, derived from the spa id)", stable)
             self.client_id = stable
