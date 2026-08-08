@@ -471,20 +471,26 @@ class GeckoCloudRelay:
 
         lc = self.local_client
         if lc is not None and msg.src.startswith("SPA"):
-            # Learn from anything the spa says, before working out whether it
-            # can be delivered. A notification addressed to an app that has
-            # since gone away is still true, and dropping it unread is how the
-            # dashboard ends up quietly holding a stale set point.
+            if msg.dst == getattr(lc, "client_id", None) or not msg.dst:
+                # Either addressed to the poller, which is how the module
+                # answers a client whose traffic arrives from the cloud side,
+                # or unaddressed, which is how it answers a LAN-dialect one.
+                # The poller is the only client living in this process, so both
+                # belong to it.
+                #
+                # deliver(), not snoop(): this is our own conversation, and
+                # snoop() is deliberately mute. Feeding our own replies through
+                # it as well would let it complete the status block first, and
+                # the poller would never send the STATQ that arms change
+                # notifications, because the block was already full by the time
+                # the real handler saw it.
+                lc.deliver(msg, addr)
+                return
+            # Not ours to receive, but still worth reading on the way past. A
+            # notification addressed to an app that has since gone away is
+            # still true, and dropping it unread is how the dashboard ends up
+            # quietly holding a stale set point.
             lc.snoop(msg)
-
-        if lc is not None and msg.src.startswith("SPA") and (
-                msg.dst == getattr(lc, "client_id", None) or not msg.dst):
-            # Either addressed to the poller, which is how the module answers a
-            # client whose traffic arrives from the cloud side, or unaddressed,
-            # which is how it answers a LAN-dialect one. The poller is the only
-            # client living in this process, so both belong to it.
-            lc.deliver(msg, addr)
-            return
 
         target = self.resolve_target(msg)
         if target is None:

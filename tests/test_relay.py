@@ -197,6 +197,14 @@ def scenario_end_to_end():
           f"{d['setpoint_c']} C")
     check("pack files learned", "inXM_C06.xml" in poller.pack_files,
           poller.pack_files)
+    # The channel step exists because the module wants to be asked, not because
+    # we want the answer, but the answer is worth keeping now we have it.
+    check("RF channel learned from the CURCH step",
+          d.get("rf_channel") == mock_spa.RF_CHANNEL, d.get("rf_channel"))
+    check("handshake ran to completion and settled into watching",
+          d.get("step") == "watching", d.get("step"))
+    check("the module refused nothing along the way", spa.refused == 0,
+          f"refused={spa.refused}")
     check("all pumps read as off", all(p["state"] == 0 for p in d["pumps"]))
     check("poller block matches the module byte for byte",
           bytes(poller.status.block) == bytes(spa.state.block))
@@ -421,6 +429,13 @@ def scenario_snooping():
 
     before = poller.snooped
     check("poller starts knowing nothing", not poller.status.complete)
+
+    # The app earns the block the same way anything else does: version,
+    # channel, config, then ask. Short-cutting to STATU gets it ignored, so a
+    # scenario that short-cuts would be testing the wrong thing.
+    for req in (b"AVERS\x0a", b"CURCH\x0b", b"SFILE\x0c"):
+        cli.sendto(P.build_packt(req, cid, mock_spa.SPA_ID), dest)
+        cli.recvfrom(4096)
     cli.sendto(P.build_packt(b"STATU\x0d" + (0).to_bytes(2, "big")
                              + P.BLOCK_LEN.to_bytes(2, "big"), cid, mock_spa.SPA_ID), dest)
 
@@ -558,6 +573,64 @@ def scenario_upstream():
         check("rejects a bad port", True)
 
 
+def scenario_handshake_discipline():
+    """The two rules that make the difference between a block and silence.
+
+    Neither is guessable and neither produces an error when broken, so both are
+    pinned here rather than left to be rediscovered against hardware. The mock
+    enforces the same rules; the authority for both is geckolib, which talks to
+    this module successfully from Home Assistant.
+    """
+    print()
+    print("handshake discipline")
+
+    relay = GeckoCloudRelay(host="127.0.0.1", port=0)
+    poller = StatusPoller(relay, client_id="GRLYseq-0001")
+
+    # Sequence numbers live in two spaces. Protocol requests that stray into
+    # the pack-command range are dropped by the module without a word.
+    seqs = [poller.next_seq() for _ in range(400)]
+    check("protocol sequences stay in 1-191",
+          all(1 <= s <= 191 for s in seqs), f"{min(seqs)}..{max(seqs)}")
+    check("protocol sequences wrap rather than stall",
+          len(set(seqs)) == 191, len(set(seqs)))
+    cmds = [poller.next_cmd_seq() for _ in range(200)]
+    check("command sequences stay in 192-255",
+          all(192 <= s <= 255 for s in cmds), f"{min(cmds)}..{max(cmds)}")
+    check("the two spaces never collide", not set(seqs) & set(cmds))
+    relay.close()
+
+    # Order. Each step waits for its own answer; the block is asked for last.
+    relay = GeckoCloudRelay(host="127.0.0.1", port=0)
+    relay_port = relay.sock.getsockname()[1]
+    threading.Thread(target=relay.serve_forever, daemon=True).start()
+    spa = start_spa(relay_port)
+    poller = StatusPoller(relay, client_id="GRLYorder-0001")
+    threading.Thread(target=poller.run, daemon=True).start()
+
+    ok = wait_for(lambda: poller.connected, 25)
+    check("strict module served the block to an orderly client", ok, poller.step)
+    check("nothing was refused on the way", spa.refused == 0,
+          f"refused={spa.refused}")
+
+    # And the periodic poll, which is the whole point: the block is re-read on
+    # a timer, so a dashboard left alone does not quietly go stale.
+    poller.last_full_refresh = 0.0
+    before = spa.state.block[P.OFF_DISPLAYED_TEMP:P.OFF_DISPLAYED_TEMP + 2]
+    with spa._lock:
+        spa.state.block[P.OFF_DISPLAYED_TEMP:P.OFF_DISPLAYED_TEMP + 2] = \
+            P.c_to_raw(38.5).to_bytes(2, "big")
+    ok = wait_for(lambda: abs((poller.as_dict().get("water_c") or 0) - 38.5) < 0.05, 15)
+    check("a periodic refresh picks up a change nobody notified us about", ok,
+          poller.as_dict().get("water_c"))
+    check("the refresh was a real re-read, not the old value",
+          before != spa.state.block[P.OFF_DISPLAYED_TEMP:P.OFF_DISPLAYED_TEMP + 2])
+
+    poller.stop()
+    spa.running = False
+    relay.close()
+
+
 def scenario_partial_knowledge():
     """A module that pushes changes but will not dump the block.
 
@@ -591,6 +664,7 @@ def main():
     scenario_identity()
     scenario_snooping()
     scenario_upstream()
+    scenario_handshake_discipline()
     scenario_partial_knowledge()
     scenario_end_to_end()
     print()

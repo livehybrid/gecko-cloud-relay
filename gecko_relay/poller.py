@@ -4,35 +4,45 @@ The relay alone is blind: it forwards bytes but never learns what the spa is
 doing. This joins the conversation as an ordinary client so the dashboard can
 show real temperatures and pump states.
 
-It behaves like the app does:
+The handshake is a **conversation, not a volley**. That distinction cost a day.
+Firing the requests off together gets you answers to some of them and silence
+on ``STATU``, which reads exactly like a module that has decided not to serve
+the status block to this client. It has not decided anything of the sort. It
+wants to be asked one thing at a time:
 
   1. ``<HELLO>1</HELLO>`` to discover the module's id, unless one was pinned
-  2. ``<HELLO>{client_id}</HELLO>`` to announce itself
-  3. pull the pack file list, the version and the full status block
-  4. ``APING`` every 2 seconds
+  2. ``AVERS``  -> ``SVERS``   firmware versions
+  3. ``CURCH``  -> ``CHCUR``   RF channel and signal strength
+  4. ``SFILE``  -> ``FILES``   which pack this is
+  5. ``STATU``  -> ``STATV``   the status block, in 39-byte chunks
+  6. ``STATQ``                 arm change notifications, then ``APING`` every 2s
 
-Every step after discovery names the spa in ``DESCN``. Both of those matter:
-the module ignores clients it has not been introduced to, and geckolib's
-captures show the real app always addressing the spa explicitly.
+Each step waits for its own answer before the next goes out. Skipping the
+channel step, or asking for the block before the config file has come back,
+loses the block silently.
+
+Sequence numbers are two separate spaces, which is not guessable and is not
+optional: **1-191 for protocol requests, 192-255 for pack commands**. A
+``STATU`` numbered like a keypress is ignored without complaint. Both facts are
+straight out of geckolib, which is the same protocol talking to the same module
+from Home Assistant, and is the reference whenever this file and the hardware
+disagree.
+
+Every step after discovery names the spa in ``DESCN``. The module ignores
+clients it has not been introduced to, and captures show the real app always
+addressing the spa explicitly.
 
 The 2 second ping is not arbitrary either. If the ping lapses, the module stops
 sending change notifications to that client.
 
-It talks entirely through the relay, which is to say it looks exactly like the
-phone app, and that turns out to be the only thing the module really cares
-about.
-
-Introducing itself over the LAN with ``<HELLO>{client_id}</HELLO>`` gets you
-into the module's LAN bucket, where it will answer ``AVERS`` and ``SFILE`` and
-then quietly refuse to serve the status block at all. No error, no reply,
-nothing to debug. A client whose packets simply arrive from the cloud side, as
-the app's do, is served in full and answered by name.
-
-So there is no announce here and no socket of its own. Requests go out through
-the relay on port 10022 with ``SRCCN``/``DESCN`` set, byte for byte what the
-relay forwards on behalf of the app, and the relay hands the replies back via
+There is no announce here and no socket of its own. Requests go out through the
+relay on port 10022 with ``SRCCN``/``DESCN`` set, byte for byte what the relay
+forwards on behalf of the app, and the relay hands the replies back via
 ``deliver``. Unaddressed replies are still accepted, since a module that does
 answer LAN-style should not leave the dashboard empty.
+
+``snoop`` remains as a belt-and-braces path: anything the module sends to the
+phone app crosses the relay anyway, and reading it costs nothing.
 """
 
 from __future__ import annotations
@@ -48,10 +58,25 @@ from . import protocol as P
 LOG = logging.getLogger("gecko.poller")
 
 PING_INTERVAL = 2.0
-REFRESH_INTERVAL = 300.0
+# Change notifications carry the traffic; this is the backstop that catches a
+# notification we missed and re-reads anything the module never told us about.
+REFRESH_INTERVAL = 60.0
+STEP_TIMEOUT = 4.0             # geckolib's PROTOCOL_TIMEOUT_IN_SECONDS
+STEP_RETRIES = 4               # per step, before restarting the handshake
+STEP_PAUSE = 0.3               # geckolib pauses between steps; so do we
 HANDSHAKE_RETRY = 5.0
 HANDSHAKE_RETRY_MAX = 60.0     # back off rather than hammer a module that is not answering
 HELLO_RETRY = 2.0
+
+# Sequence numbers live in two separate spaces and the module cares. A status
+# request numbered like a pack command is dropped in silence.
+SEQ_PROTOCOL = (1, 191)
+SEQ_COMMAND = (192, 255)
+
+# geckolib asks for 1024 bytes, comfortably past the end of a 637-byte block,
+# and the module simply stops when it runs out. Asking for exactly BLOCK_LEN
+# also works, but there is no reason to differ from the client we know works.
+BLOCK_REQUEST_LEN = 1024
 # If the module never answers discovery, stop waiting and talk to it the way the
 # original capture showed, with no DESCN. Better a degraded dashboard than none.
 DISCOVERY_GIVE_UP = 30.0
@@ -91,7 +116,8 @@ class StatusPoller:
         self.spa_id = spa_id or ""          # DESCN; learned by discovery if unset
         self.pinned_spa_id = bool(spa_id)
         self.status = P.SpaStatus()
-        self.seq = 0x20
+        self.seq = SEQ_PROTOCOL[0] - 1
+        self.cmd_seq = SEQ_COMMAND[0] - 1
         self.running = True
         self.connected = False
         # A module may push change notifications while still declining to dump
@@ -103,7 +129,15 @@ class StatusPoller:
         self.last_ping = 0.0
         self.last_update = 0.0
         self.pack_files = ""
+        self.versions = ""
+        self.channel: Optional[int] = None
+        self.signal: Optional[int] = None
         self.errors = 0
+        # Where the handshake has got to, so a stall is legible in the
+        # dashboard and the log rather than being an unexplained silence.
+        self.step = "version"
+        self._step_sent = 0.0
+        self._step_tries = 0
         # Which path replies actually took. Against real hardware this should be
         # all relay and no direct; if that ever flips, the asymmetry above is
         # wrong for that firmware and the dashboard is running on luck.
@@ -120,8 +154,16 @@ class StatusPoller:
         self._lock = threading.RLock()
 
     def next_seq(self) -> int:
-        self.seq = (self.seq + 1) & 0xFF
+        """Sequence for a protocol request: AVERS, CURCH, SFILE, STATU, STATQ."""
+        lo, hi = SEQ_PROTOCOL
+        self.seq = lo if self.seq >= hi else self.seq + 1
         return self.seq
+
+    def next_cmd_seq(self) -> int:
+        """Sequence for a pack command: SPACK. A separate space, see the header."""
+        lo, hi = SEQ_COMMAND
+        self.cmd_seq = lo if self.cmd_seq >= hi else self.cmd_seq + 1
+        return self.cmd_seq
 
     # -- transmit ----------------------------------------------------------
 
@@ -162,6 +204,7 @@ class StatusPoller:
     def _reset(self) -> None:
         self.connected = False
         self.live = False
+        self._begin_handshake()
         self._announced = False
         self._target = None
         self._candidates = []
@@ -180,6 +223,7 @@ class StatusPoller:
         self._announced = False
         self._discovery_started = time.time()
         self._handshake_backoff = HANDSHAKE_RETRY
+        self._begin_handshake()
         LOG.info("poller targeting spa at %s:%s", *self._target)
 
     def pump(self) -> None:
@@ -203,21 +247,70 @@ class StatusPoller:
             self._settle_client_id()
 
         if not self.connected:
-            if now - self.last_ping > self._handshake_backoff:
-                self.last_ping = now
-                LOG.info("poller starting handshake with %s (retry in %.0fs if quiet)",
-                         self.spa_id or "spa", self._handshake_backoff)
-                self.send(b"SFILE" + bytes([self.next_seq()]))
-                self.send(b"AVERS" + bytes([self.next_seq()]))
-                self.request_full_block()
-                self._handshake_backoff = min(self._handshake_backoff * 1.5,
-                                              HANDSHAKE_RETRY_MAX)
+            self._advance_handshake(now)
         else:
             if now - self.last_ping >= PING_INTERVAL:
                 self.last_ping = now
                 self.send(b"APING")
             if now - self.last_full_refresh >= REFRESH_INTERVAL:
+                LOG.debug("periodic status refresh")
                 self.request_full_block()
+
+    # -- handshake ---------------------------------------------------------
+
+    def _send_step(self, step: str) -> None:
+        if step == "version":
+            self.send(b"AVERS" + bytes([self.next_seq()]))
+        elif step == "channel":
+            self.send(b"CURCH" + bytes([self.next_seq()]))
+        elif step == "config":
+            self.send(b"SFILE" + bytes([self.next_seq()]))
+        elif step == "block":
+            self.request_full_block()
+
+    def _advance_handshake(self, now: float) -> None:
+        """One step at a time, waiting for each answer.
+
+        The previous version sent every request in one go and then reported the
+        module as refusing to answer. It was not refusing. It was being asked
+        four things at once by a client it had not finished admitting.
+        """
+        if now - self._step_sent < STEP_TIMEOUT:
+            return
+
+        if self._step_tries >= STEP_RETRIES:
+            # This step is genuinely not being answered. Start the whole
+            # conversation again rather than pressing on out of order, and back
+            # off so a module that is busy or asleep is not hammered.
+            LOG.warning("no answer to %s after %d tries; restarting the handshake "
+                        "(next attempt in %.0fs)",
+                        self.step, self._step_tries, self._handshake_backoff)
+            self._begin_handshake(now + self._handshake_backoff)
+            self._handshake_backoff = min(self._handshake_backoff * 1.5,
+                                          HANDSHAKE_RETRY_MAX)
+            return
+
+        if self._step_tries == 0:
+            LOG.info("handshake with %s: %s", self.spa_id or "spa", self.step)
+        self._step_sent = now
+        self._step_tries += 1
+        self._send_step(self.step)
+
+    def _begin_handshake(self, at: float = 0.0) -> None:
+        self.step = "version"
+        self._step_tries = 0
+        # Setting this in the future is how a restart waits out its backoff.
+        self._step_sent = at - STEP_TIMEOUT if at else 0.0
+
+    def _step_done(self, step: str, nxt: str) -> None:
+        """An expected answer arrived. Move on, after a short breath."""
+        if self.connected or self.step != step:
+            return                      # a late duplicate, or we have moved on
+        self.step = nxt
+        self._step_tries = 0
+        self._handshake_backoff = HANDSHAKE_RETRY
+        # Pause before the next request, as geckolib does between steps.
+        self._step_sent = time.time() - STEP_TIMEOUT + STEP_PAUSE
 
     def _settle_client_id(self) -> None:
         """Adopt a client id that will be the same after a restart.
@@ -270,14 +363,14 @@ class StatusPoller:
         key = BUTTONS[button]
         LOG.info("keypress %s (%s) from the dashboard", button,
                  P.KEYPAD.get(key, hex(key)))
-        self.send(b"SPACK" + bytes([self.next_seq(), 0x06, 0x02, P.CMD_KEYPRESS, key]))
+        self.send(b"SPACK" + bytes([self.next_cmd_seq(), 0x06, 0x02, P.CMD_KEYPRESS, key]))
 
     def set_setpoint(self, celsius: float) -> float:
         """Write the water set point. Returns the value actually sent."""
         c = max(SETPOINT_MIN_C, min(SETPOINT_MAX_C, float(celsius)))
         raw = P.c_to_raw(c)
         LOG.info("set point -> %.1f C (raw %d) from the dashboard", c, raw)
-        self.send(b"SPACK" + bytes([self.next_seq(), 0x06, 0x07, P.CMD_SETVALUE,
+        self.send(b"SPACK" + bytes([self.next_cmd_seq(), 0x06, 0x07, P.CMD_SETVALUE,
                                     0x06, 0x06])
                   + P.OFF_SETPOINT.to_bytes(2, "big") + raw.to_bytes(2, "big"))
         return c
@@ -290,7 +383,7 @@ class StatusPoller:
     def request_full_block(self) -> None:
         self.last_full_refresh = time.time()
         self.send(b"STATU" + bytes([self.next_seq()])
-                  + (0).to_bytes(2, "big") + P.BLOCK_LEN.to_bytes(2, "big"))
+                  + (0).to_bytes(2, "big") + BLOCK_REQUEST_LEN.to_bytes(2, "big"))
 
     def snoop(self, msg: P.Message) -> None:
         """Learn from a status block the module sent to somebody else.
@@ -352,10 +445,17 @@ class StatusPoller:
                 index, _nxt, ln = body[0], body[1], body[2]
                 self.status.apply_block(index, body[3:3 + ln])
                 self.last_update = time.time()
+                # Chunks arrive one datagram each, so hold the step open while
+                # they are still coming rather than timing out mid-block.
+                self._step_tries = 0
+                self._step_sent = time.time()
                 if self.status.complete and not self.connected:
                     self.connected = True
+                    self.step = "watching"
                     self._handshake_backoff = HANDSHAKE_RETRY
                     LOG.info("poller has a complete status block")
+                    # Arm change notifications now the baseline is in hand.
+                    self.send(b"STATQ" + bytes([self.next_seq()]))
             elif msg.verb == "STATP":
                 self.live = True
                 changed = self.status.apply_statp(body)
@@ -367,6 +467,14 @@ class StatusPoller:
             elif msg.verb == "FILES":
                 self.pack_files = body.decode("latin1", "replace").lstrip(",")
                 LOG.info("spa pack files: %s", self.pack_files)
+                self._step_done("config", "block")
+            elif msg.verb == "SVERS":
+                self.versions = body.hex()
+                self._step_done("version", "channel")
+            elif msg.verb == "CHCUR" and len(body) >= 2:
+                self.channel, self.signal = body[0], body[1]
+                LOG.info("spa RF channel %s, signal %s", self.channel, self.signal)
+                self._step_done("channel", "config")
 
     def on_hello(self, msg: P.Message, addr: tuple[str, int]) -> None:
         """Discovery reply: ``<HELLO>SPAxx:xx:...|Name</HELLO>``."""
@@ -395,6 +503,9 @@ class StatusPoller:
             "client_id": self.client_id,
             "spa_id": self.spa_id,
             "pack_files": self.pack_files,
+            "step": self.step,
+            "rf_channel": self.channel,
+            "rf_signal": self.signal,
             "errors": self.errors,
             "via_relay": self.via_relay,
             "snooped": self.snooped,

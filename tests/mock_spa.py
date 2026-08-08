@@ -6,13 +6,22 @@ Covers the parts of the module's behaviour the relay actually depends on:
     in.touch 2 server is
   * LAN discovery, ``<HELLO>1</HELLO>`` in, ``<HELLO>{id}|{name}</HELLO>`` out
   * client announcement, ``<HELLO>{client_id}</HELLO>``
-  * the handshake verbs ``SFILE`` and ``AVERS``
+  * the handshake verbs ``AVERS``, ``CURCH`` and ``SFILE``, **in order**
   * status block reads (``STATU`` -> a run of ``STATV`` chunks)
   * change notification (``STATP``) and its re-arm (``STATQ``)
   * the two ``SPACK`` commands the app sends: keypress and write
 
 The state it holds is a real 637 byte block at the real offsets, so the decode
 path in protocol.py is exercised rather than mocked.
+
+It is also **strict about the handshake**, and that is the point of it. The real
+module ignores a ``STATU`` from a client that has not completed the version,
+channel and config steps first, and ignores one numbered in the pack-command
+sequence space (192-255). No error comes back in either case, so a client that
+gets this wrong looks like a client the module has taken a dislike to. The mock
+refuses the same requests, and counts them, so the mistake is visible in a test
+instead of being discovered against hardware. Pass ``lax=True`` to switch the
+strictness off and get the older, more forgiving behaviour.
 
 Run standalone against a relay:
 
@@ -43,6 +52,11 @@ SPA_ID = "SPA80:1f:12:50:a5:d1"
 SPA_NAME = "Spa"
 PACK_FILES = ",inXM_C06.xml,inXM_S06.xml"
 VERSION = b"\x01\x2c\x00\x03\x00\x02"
+RF_CHANNEL = 17
+RF_SIGNAL = 62
+
+# Protocol requests are numbered 1-191, pack commands 192-255.
+SEQ_PROTOCOL_MAX = 191
 
 CLOUD_PING_INTERVAL = 21.0      # what a real EN module does
 PUMP_RUN_MINUTES = 15
@@ -83,7 +97,8 @@ def default_block() -> bytearray:
 
 class GeckoMockServer:
     def __init__(self, host: str = "0.0.0.0", port: int = P.PORT,
-                 spa_id: str = SPA_ID, name: str = SPA_NAME):
+                 spa_id: str = SPA_ID, name: str = SPA_NAME,
+                 lax: bool = False):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -99,6 +114,11 @@ class GeckoMockServer:
         # DESCN, and answers cloud-dialect clients by name. The relay has to
         # cope with both, so the mock reproduces both.
         self.lan_clients: set[str] = set()
+        # How far through the handshake each client has got, and how many
+        # requests were dropped for being out of order or misnumbered.
+        self.progress: dict[str, set] = {}
+        self.refused = 0
+        self.lax = lax
         self.cloud: tuple[str, int] | None = None
         self.cloud_interval = CLOUD_PING_INTERVAL
         self.cloud_acks = 0
@@ -205,13 +225,21 @@ class GeckoMockServer:
             self.add_client(msg.src, addr)
 
         body, verb, src = msg.body, msg.verb, msg.src
+        done = self.progress.setdefault(src, set())
         if verb == "APING":
             self.reply(addr, b"PACKS", src)
-        elif verb == "SFILE":
-            self.reply(addr, b"FILES" + PACK_FILES.encode(), src)
         elif verb == "AVERS":
+            done.add("AVERS")
             self.reply(addr, b"SVERS" + VERSION, src)
+        elif verb == "CURCH":
+            done.add("CURCH")
+            self.reply(addr, b"CHCUR" + bytes([RF_CHANNEL, RF_SIGNAL]), src)
+        elif verb == "SFILE":
+            done.add("SFILE")
+            self.reply(addr, b"FILES" + PACK_FILES.encode(), src)
         elif verb == "STATU":
+            if not self._may_read_block(body, done, src):
+                return
             start = int.from_bytes(body[1:3], "big") if len(body) >= 5 else 0
             length = int.from_bytes(body[3:5], "big") if len(body) >= 5 else P.BLOCK_LEN
             self.send_status_block(addr, src, start, length)
@@ -219,6 +247,32 @@ class GeckoMockServer:
             pass                              # notification re-armed
         elif verb == "SPACK":
             self.on_spack(body)
+
+    HANDSHAKE_BEFORE_BLOCK = ("AVERS", "CURCH", "SFILE")
+
+    def _may_read_block(self, body: bytes, done: set, src: str) -> bool:
+        """Would the real module answer this STATU?
+
+        Two ways to be turned down, neither of which produces a reply, which is
+        what makes them expensive to diagnose on hardware:
+
+          * asking before the version, channel and config steps have completed
+          * numbering the request in the pack-command sequence space
+        """
+        if self.lax:
+            return True
+        missing = [v for v in self.HANDSHAKE_BEFORE_BLOCK if v not in done]
+        if missing:
+            self.refused += 1
+            LOG.debug("mock spa ignoring STATU from %s, still owed %s",
+                      src, ",".join(missing))
+            return False
+        if body and body[0] > SEQ_PROTOCOL_MAX:
+            self.refused += 1
+            LOG.debug("mock spa ignoring STATU from %s, sequence %d is in the "
+                      "pack-command space", src, body[0])
+            return False
+        return True
 
     # -- status block ------------------------------------------------------
 
@@ -345,12 +399,42 @@ def selftest() -> int:
           and m.value.decode().startswith(SPA_ID), m.value if m else None)
 
     cli.sendto(P.build_tag("HELLO", cid), dest)
-    cli.sendto(P.build_packt(b"SFILE\x01", cid, SPA_ID), dest)
+
+    # Out of order on purpose: the block is not on offer yet, and asking gets
+    # silence rather than a refusal. This is the failure mode the relay spent a
+    # day misreading as the module singling it out.
+    before = spa.refused
+    cli.sendto(P.build_packt(b"STATU\x01" + (0).to_bytes(2, "big")
+                             + P.BLOCK_LEN.to_bytes(2, "big"), cid, SPA_ID), dest)
+    time.sleep(0.3)
+    check("STATU before the handshake is ignored, silently",
+          spa.refused == before + 1, f"refused={spa.refused}")
+
+    cli.sendto(P.build_packt(b"AVERS\x01", cid, SPA_ID), dest)
+    m = P.parse(cli.recvfrom(4096)[0])
+    check("AVERS returns the firmware versions", m and m.verb == "SVERS",
+          m.verb if m else None)
+
+    cli.sendto(P.build_packt(b"CURCH\x02", cid, SPA_ID), dest)
+    m = P.parse(cli.recvfrom(4096)[0])
+    check("CURCH returns the RF channel and signal",
+          m and m.verb == "CHCUR" and m.body[0] == RF_CHANNEL,
+          m.body.hex() if m else None)
+
+    cli.sendto(P.build_packt(b"SFILE\x03", cid, SPA_ID), dest)
     m = P.parse(cli.recvfrom(4096)[0])
     check("SFILE returns the pack files", m and m.verb == "FILES"
           and b"inXM_C06.xml" in m.body, m.verb if m else None)
 
-    cli.sendto(P.build_packt(b"STATU\x02" + (0).to_bytes(2, "big")
+    # Handshake complete but numbered like a pack command: still ignored.
+    before = spa.refused
+    cli.sendto(P.build_packt(b"STATU\xc8" + (0).to_bytes(2, "big")
+                             + P.BLOCK_LEN.to_bytes(2, "big"), cid, SPA_ID), dest)
+    time.sleep(0.3)
+    check("STATU numbered in the command space is ignored",
+          spa.refused == before + 1, f"refused={spa.refused}")
+
+    cli.sendto(P.build_packt(b"STATU\x04" + (0).to_bytes(2, "big")
                              + P.BLOCK_LEN.to_bytes(2, "big"), cid, SPA_ID), dest)
     st = P.SpaStatus()
     deadline = time.time() + 3
