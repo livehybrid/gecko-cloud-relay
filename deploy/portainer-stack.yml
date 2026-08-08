@@ -33,12 +33,22 @@ services:
       GECKO_PORT: "10022"
       GECKO_WEB_PORT: "8080"
       GECKO_LOG_SIZE: "500"
-      # TEMPORARY, 2026-08-08. The poller became a fully registered pack client
-      # and Home Assistant lost the spa minutes later, RF signal falling from
-      # ~50 to 1. Two clients pulling the whole 637-byte block over the same
-      # narrow RF link to the pack is the suspect. Off until that is understood;
-      # Home Assistant matters more than this dashboard.
-      GECKO_NO_POLL: "1"
+      # On, but read the intervals below before touching them.
+      #
+      # 2026-08-08: shipped at ping 2s / full re-read 60s and Home Assistant
+      # lost the spa eight minutes later, its RF signal falling from ~50 to 1.
+      # That turned out not to be a fight over the module: with the poller
+      # running, Home Assistant reconnected and both have read the spa happily
+      # side by side ever since, so the radio wobbled and geckolib tore its
+      # session down (ERROR_TOO_MANY_RF_ERRORS). Whether the load helped it
+      # wobble is not established, so the settings stay conservative.
+      GECKO_NO_POLL: "0"
+      # Neither of these affects how fresh the dashboard is: once STATQ is armed
+      # the module pushes changes as they happen. They only decide how hard the
+      # RF link to the spa pack is worked, and that link is shared with Home
+      # Assistant and the phone app. geckolib's idle profile is 60s / 120s.
+      GECKO_PING_INTERVAL: "15"
+      GECKO_REFRESH_INTERVAL: "600"
       # Also forward to Gecko's own service, so the app still works from
       # outside the network. Local control does not depend on this: the module
       # is answered here first and only then passed on.
