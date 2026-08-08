@@ -63,10 +63,14 @@ def default_block() -> bytearray:
     def word(off, val):
         b[off:off + 2] = int(val).to_bytes(2, "big")
 
-    word(P.OFF_SETPOINT, P.c_to_raw(36.0))      # 648
-    word(P.OFF_WATER_TEMP, P.c_to_raw(35.5))
-    word(P.OFF_HEATER_TEMP, P.c_to_raw(35.8))
-    word(P.OFF_WATER_TEMP_2, P.c_to_raw(35.5))
+    # Deliberately all different. Real hardware reports three temperatures that
+    # disagree by a couple of degrees, and giving them the same value here would
+    # hide a field being read from the wrong offset.
+    word(P.OFF_SETPOINT, P.c_to_raw(36.0))          # 648
+    word(P.OFF_REAL_SETPOINT, P.c_to_raw(36.0))
+    word(P.OFF_DISPLAYED_TEMP, P.c_to_raw(33.5))
+    word(P.OFF_RH_WATER_TEMP, P.c_to_raw(33.1))
+    word(P.OFF_RH_TRIAC_TEMP, P.c_to_raw(35.1))
 
     b[P.OFF_PUMP_STATUS] = 0x00
     b[P.OFF_LIGHT] = 0x00

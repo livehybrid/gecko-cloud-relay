@@ -19,10 +19,16 @@ STATV_CHUNK = 39
 
 OFF_LIGHT_TIMEOUT_CFG = 2     # byte, minutes
 OFF_PUMP_TIMEOUT_CFG = 4      # byte, minutes
-OFF_SETPOINT = 15             # word BE
-OFF_WATER_TEMP = 261          # word BE
-OFF_HEATER_TEMP = 263         # word BE
-OFF_WATER_TEMP_2 = 265        # word BE
+OFF_SETPOINT = 15             # word BE, SetpointG
+# Three temperature words live together and only one of them is the water
+# temperature anyone means. Names are Gecko's own, from the inXM log pack:
+OFF_RH_WATER_TEMP = 261       # word BE, RhWaterTemp: water at the heater assembly
+OFF_RH_TRIAC_TEMP = 263       # word BE, RhTriacTemp: the heater's triac. Electronics,
+                              # not water. Runs a couple of degrees hotter and is not
+                              # a reading to show anyone as "the temperature".
+OFF_DISPLAYED_TEMP = 265      # word BE, DisplayedTempG: what the topside panel shows
+OFF_REAL_SETPOINT = 272       # word BE, RealSetPointG: the target actually in force,
+                              # which economy and smart winter modes move about
 OFF_PUMP_STATUS = 275         # 0x0113, 2-bit fields, pump 1 in bits 7:6
 OFF_LIGHT = 306               # 0x0132
 OFF_AUX = 355                 # 0x0163
@@ -239,8 +245,10 @@ class SpaStatus:
     def as_dict(self) -> dict:
         if not any(self.have):
             return {"known": False}
-        sp, wt, ht = (self._temp(o) for o in
-                      (OFF_SETPOINT, OFF_WATER_TEMP, OFF_HEATER_TEMP))
+        sp, wt, rw, tr, rsp = (self._temp(o) for o in
+                               (OFF_SETPOINT, OFF_DISPLAYED_TEMP,
+                                OFF_RH_WATER_TEMP, OFF_RH_TRIAC_TEMP,
+                                OFF_REAL_SETPOINT))
         have_pumps = self.has(OFF_PUMP_STATUS)
         return {
             "known": True,
@@ -248,9 +256,12 @@ class SpaStatus:
             "setpoint_c": round(raw_to_c(sp), 1) if sp is not None else None,
             "setpoint_f": round(raw_to_f(sp), 1) if sp is not None else None,
             "setpoint_raw": sp,
+            "real_setpoint_c": round(raw_to_c(rsp), 1) if rsp is not None else None,
+            # water_* is DisplayedTempG, the figure on the tub's own panel.
             "water_c": round(raw_to_c(wt), 1) if wt is not None else None,
             "water_f": round(raw_to_f(wt), 1) if wt is not None else None,
-            "heater_c": round(raw_to_c(ht), 1) if ht is not None else None,
+            "rh_water_c": round(raw_to_c(rw), 1) if rw is not None else None,
+            "triac_c": round(raw_to_c(tr), 1) if tr is not None else None,
             "pumps": [
                 {"n": n,
                  "state": self.pump(n) if have_pumps else None,

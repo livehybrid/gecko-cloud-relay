@@ -129,10 +129,11 @@ but not decoded.
 |---|---|---|---|
 | 2 | 0x002 | byte | Light timeout, minutes (config) |
 | 4 | 0x004 | byte | Pump timeout, minutes (config) |
-| 15 | 0x00F | word | Set point |
-| 261 | 0x105 | word | Water temperature |
-| 263 | 0x107 | word | Heater temperature |
-| 265 | 0x109 | word | Water temperature, second sensor |
+| 15 | 0x00F | word | `SetpointG`, the set point you asked for |
+| 261 | 0x105 | word | `RhWaterTemp`, water at the heater assembly |
+| 263 | 0x107 | word | `RhTriacTemp`, the heater's triac. **Electronics, not water** |
+| 265 | 0x109 | word | `DisplayedTempG`, the figure on the topside panel |
+| 272 | 0x110 | word | `RealSetPointG`, the target actually in force |
 | 275 | 0x113 | byte | Pump status, 2-bit fields; pump 1 in bits 7:6, aux in bits 1:0 |
 | 306 | 0x132 | byte | Light |
 | 355 | 0x163 | byte | Aux **(unverified)** |
@@ -155,6 +156,20 @@ raw = (°F − 32) × 10 = °C × 18
 Raw 648 is 36.0 °C, or 96.8 °F. Worth stating plainly because the obvious
 guess, tenths of °F, gives 64.8 °F and is wrong in a way that looks almost
 plausible.
+
+### Which of the three is "the temperature"
+
+Offsets 261, 263 and 265 all decode to sensible-looking water temperatures a
+degree or two apart, so any of them will pass a smoke test. Only 265,
+`DisplayedTempG`, is the number the tub shows on its own panel and the number
+geckolib reports to Home Assistant. 263 is the triac: it is the temperature of
+the electronics that switch the heater, it tracks the water loosely, and it
+runs hotter. Naming it "heater temperature" on a dashboard invites the reader
+to believe the water is warmer than it is.
+
+Names here are Gecko's own, taken from the `inXM` log pack. If you are decoding
+a different pack, check its own offsets rather than assuming these: the same
+field sits at 277 in the `inYT` and `inXE` packs.
 
 ## How a module answers, which is not how you would guess
 

@@ -185,6 +185,14 @@ def scenario_end_to_end():
     d = poller.as_dict()
     check("water temperature decoded", d.get("known") and 20 < d["water_c"] < 45,
           f"{d.get('water_c')} C")
+    # The three temperature words sit next to each other and are easy to swap.
+    # DisplayedTempG is the one a person means by "the temperature".
+    check("water is DisplayedTempG, not the neighbouring sensors",
+          abs(d["water_c"] - 33.5) < 0.05, d["water_c"])
+    check("heater assembly water read separately",
+          abs(d["rh_water_c"] - 33.1) < 0.05, d["rh_water_c"])
+    check("triac temperature read separately and not as water",
+          abs(d["triac_c"] - 35.1) < 0.05, d["triac_c"])
     check("set point decoded as 36.0 C", abs(d["setpoint_c"] - 36.0) < 0.05,
           f"{d['setpoint_c']} C")
     check("pack files learned", "inXM_C06.xml" in poller.pack_files,
@@ -562,9 +570,9 @@ def scenario_partial_knowledge():
     d = st.as_dict()
     check("nothing known reads as not known", d == {"known": False}, d)
 
-    # One change notification: two bytes at the water temperature, nothing else.
+    # One change notification: two bytes at the displayed temperature, nothing else.
     raw = P.c_to_raw(34.0)
-    st.apply_statp(bytes([1]) + P.OFF_WATER_TEMP.to_bytes(2, "big")
+    st.apply_statp(bytes([1]) + P.OFF_DISPLAYED_TEMP.to_bytes(2, "big")
                    + raw.to_bytes(2, "big"))
     d = st.as_dict()
     check("the field we were told is reported", abs(d["water_c"] - 34.0) < 0.05,
@@ -575,7 +583,7 @@ def scenario_partial_knowledge():
           d["pumps"][0])
     check("light unknown rather than off", d["light"] is None, d["light"])
     check("block still reports itself incomplete", d["complete"] is False)
-    check("has() tracks byte ranges", st.has(P.OFF_WATER_TEMP, 2)
+    check("has() tracks byte ranges", st.has(P.OFF_DISPLAYED_TEMP, 2)
           and not st.has(P.OFF_SETPOINT, 2))
 
 

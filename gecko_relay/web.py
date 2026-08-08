@@ -97,6 +97,10 @@ PAGE = r"""<!doctype html>
   .tsub { margin-top: 10px; display: flex; gap: 26px; font-family: var(--mono);
           font-size: 13px; flex-wrap: wrap; }
   .tsub span { color: var(--dim); }
+  /* A reading with no timestamp beside it reads as "now". These often are not:
+     the module only tells us things while it is talking to somebody. */
+  .age { margin-top: 8px; font-size: 12px; color: var(--dim); }
+  .age.stale { color: var(--led-amber); }
   .bar { margin-top: 14px; height: 4px; background: var(--panel-2);
          border-radius: 2px; overflow: hidden; }
   .bar div { height: 100%; background: var(--water); transition: width .5s ease; }
@@ -192,9 +196,12 @@ PAGE = r"""<!doctype html>
       <div class="temp"><b id="water">--.-</b><i>&deg;C</i></div>
       <div class="tsub">
         <div><span>Set point</span> <b id="setpoint">--.-</b> &deg;C</div>
-        <div><span>Heater</span> <b id="heater">--.-</b> &deg;C</div>
+        <div><span>In force</span> <b id="realsetpoint">--.-</b> &deg;C</div>
         <div><span>&deg;F</span> <b id="waterf">--.-</b></div>
+        <div><span title="Water at the heater assembly">Heater water</span> <b id="rhwater">--.-</b> &deg;C</div>
+        <div><span title="The heater's triac. Electronics, not water">Triac</span> <b id="triac">--.-</b> &deg;C</div>
       </div>
+      <div class="age" id="tempage"></div>
       <div class="bar"><div id="tempbar" style="width:0%"></div></div>
       <div class="step">
         <button id="tdown" type="button" disabled aria-label="Lower the set point by 0.5 degrees">&minus;</button>
@@ -247,6 +254,13 @@ PAGE = r"""<!doctype html>
     var d = new Date(ts * 1000);
     return d.toTimeString().slice(0, 8) + '.' +
            String(d.getMilliseconds()).padStart(3, '0');
+  }
+  function ago(sec) {
+    sec = Math.max(0, Math.round(sec));
+    if (sec < 90) { return sec + 's'; }
+    if (sec < 5400) { return Math.round(sec / 60) + ' min'; }
+    var h = sec / 3600;
+    return (h < 48 ? h.toFixed(1) + ' hours' : Math.round(h / 24) + ' days');
   }
   function esc(s) {
     return String(s).replace(/[&<>]/g, function (c) {
@@ -371,7 +385,7 @@ PAGE = r"""<!doctype html>
     document.getElementById('counts').textContent =
       r.packets_in + ' / ' + r.packets_out +
       (r.packets_dropped ? '  (' + r.packets_dropped + ' dropped)' : '');
-    document.getElementById('uptime').textContent = Math.round(r.uptime_s) + 's';
+    document.getElementById('uptime').textContent = ago(r.uptime_s);
 
     document.getElementById('eps').innerHTML = r.endpoints.length
       ? r.endpoints.map(function (e) {
@@ -394,7 +408,23 @@ PAGE = r"""<!doctype html>
       document.getElementById('water').textContent = t(s.water_c);
       document.getElementById('waterf').textContent = t(s.water_f);
       document.getElementById('setpoint').textContent = t(s.setpoint_c);
-      document.getElementById('heater').textContent = t(s.heater_c);
+      document.getElementById('realsetpoint').textContent = t(s.real_setpoint_c);
+      document.getElementById('rhwater').textContent = t(s.rh_water_c);
+      document.getElementById('triac').textContent = t(s.triac_c);
+
+      // The module pushes changes rather than being polled, and only while it
+      // has somebody to push them to. Say how old this is, or the panel above
+      // quietly claims that last night's water temperature is the current one.
+      var age = document.getElementById('tempage');
+      if (s.last_update_s === null || s.last_update_s === undefined) {
+        age.textContent = 'No reading yet.';
+        age.className = 'age stale';
+      } else {
+        age.textContent = 'Updated ' + ago(s.last_update_s) + ' ago.'
+          + (s.last_update_s > 900
+             ? ' The spa only reports changes while a client is connected.' : '');
+        age.className = s.last_update_s > 900 ? 'age stale' : 'age';
+      }
       var pct = s.water_c === null || s.water_c === undefined ? 0
               : Math.max(0, Math.min(100, ((s.water_c - 10) / 30) * 100));
       document.getElementById('tempbar').style.width = pct + '%';
