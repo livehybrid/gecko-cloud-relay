@@ -57,10 +57,22 @@ from . import protocol as P
 
 LOG = logging.getLogger("gecko.poller")
 
-PING_INTERVAL = 2.0
-# Change notifications carry the traffic; this is the backstop that catches a
-# notification we missed and re-reads anything the module never told us about.
-REFRESH_INTERVAL = 60.0
+# Both of these are deliberately gentle, and the reason is written in blood.
+#
+# Once STATQ is armed the module pushes every change as it happens, so neither
+# of these controls how fresh the dashboard is. They only decide how much load
+# we put on the narrow RF link between the in.touch module and the spa pack, and
+# that link is shared with every other client. Running at ping 2s / refresh 60s
+# for eight minutes coincided with Home Assistant losing the spa completely, its
+# reported RF signal falling from around 50 to 1. Home Assistant matters more
+# than this dashboard, so pull far less often than feels necessary. geckolib's
+# own idle profile is ping 60s / refresh 120s, which is the shape to copy.
+#
+# Override with GECKO_PING_INTERVAL and GECKO_REFRESH_INTERVAL if you must, and
+# watch anything else that talks to the spa while you do.
+PING_INTERVAL = 15.0
+# The backstop that catches a notification we missed, nothing more.
+REFRESH_INTERVAL = 600.0
 STEP_TIMEOUT = 4.0             # geckolib's PROTOCOL_TIMEOUT_IN_SECONDS
 STEP_RETRIES = 4               # per step, before restarting the handshake
 STEP_PAUSE = 0.3               # geckolib pauses between steps; so do we
@@ -122,8 +134,12 @@ SETPOINT_MAX_C = 40.0
 
 class StatusPoller:
     def __init__(self, relay, client_id: Optional[str] = None,
-                 enabled: bool = True, spa_id: Optional[str] = None):
+                 enabled: bool = True, spa_id: Optional[str] = None,
+                 ping_interval: float = PING_INTERVAL,
+                 refresh_interval: float = REFRESH_INTERVAL):
         self.relay = relay
+        self.ping_interval = ping_interval
+        self.refresh_interval = refresh_interval
         # A module remembers its clients indefinitely: ours is still pinging a
         # phone session it was given by Gecko's cloud long before this existed.
         # So do not invent a fresh identity on every restart. Derive a stable
@@ -267,10 +283,10 @@ class StatusPoller:
         if not self.connected:
             self._advance_handshake(now)
         else:
-            if now - self.last_ping >= PING_INTERVAL:
+            if now - self.last_ping >= self.ping_interval:
                 self.last_ping = now
                 self.send(b"APING")
-            if now - self.last_full_refresh >= REFRESH_INTERVAL:
+            if now - self.last_full_refresh >= self.refresh_interval:
                 LOG.debug("periodic status refresh")
                 self.request_full_block()
 
@@ -533,6 +549,8 @@ class StatusPoller:
             "spa_id": self.spa_id,
             "pack_files": self.pack_files,
             "step": self.step,
+            "ping_interval_s": self.ping_interval,
+            "refresh_interval_s": self.refresh_interval,
             "rf_channel": self.channel,
             "rf_signal": self.signal,
             "errors": self.errors,

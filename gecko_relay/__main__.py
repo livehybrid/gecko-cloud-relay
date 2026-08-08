@@ -18,11 +18,16 @@ import threading
 from . import __version__
 from . import protocol as P
 from .upstream import UpstreamError, resolve_upstream
-from .poller import StatusPoller
+from .poller import PING_INTERVAL, REFRESH_INTERVAL, StatusPoller
 from .relay import GeckoCloudRelay
 from .web import start_web
 
 LOG = logging.getLogger("gecko")
+
+
+class PollerDefaults:
+    PING = PING_INTERVAL
+    REFRESH = REFRESH_INTERVAL
 
 
 def _env(name: str, default=None):
@@ -66,6 +71,16 @@ def build_parser() -> argparse.ArgumentParser:
                    default=_env_flag("ANSWER_DISCOVERY"),
                    help="Answer LAN <HELLO>1</HELLO> broadcasts. Off by default: "
                         "the spa answers these itself and two answers break the app")
+    p.add_argument("--ping-interval", type=float,
+                   default=float(_env("PING_INTERVAL", PollerDefaults.PING)),
+                   help="Seconds between keepalives to the spa (default: "
+                        "%(default)s). Raise it if another client is losing its "
+                        "session; the RF link to the pack is shared")
+    p.add_argument("--refresh-interval", type=float,
+                   default=float(_env("REFRESH_INTERVAL", PollerDefaults.REFRESH)),
+                   help="Seconds between full status block re-reads (default: "
+                        "%(default)s). Changes arrive by notification anyway, so "
+                        "this is only a backstop")
     p.add_argument("--log-size", type=int, default=int(_env("LOG_SIZE", 500)),
                    help="Wire log ring buffer size (default: %(default)s)")
     p.add_argument("-v", "--verbose", action="store_true", default=_env_flag("VERBOSE"),
@@ -111,7 +126,9 @@ def main(argv=None) -> int:
     # The poller is always constructed, even when disabled, so the dashboard can
     # say so rather than showing an empty panel with no explanation.
     poller = StatusPoller(relay, client_id=args.client_id,
-                          enabled=not args.no_poll, spa_id=args.spa_id)
+                          enabled=not args.no_poll, spa_id=args.spa_id,
+                          ping_interval=args.ping_interval,
+                          refresh_interval=args.refresh_interval)
 
     httpd = None
     if not args.no_web:
